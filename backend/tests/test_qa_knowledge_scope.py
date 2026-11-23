@@ -5,6 +5,7 @@ from app.utils.qa_knowledge_scope import (
     is_agent_kb_folder,
     user_root_folder_ids,
     folder_path_names,
+    is_user_visible_folder,
 )
 
 
@@ -39,3 +40,17 @@ def test_folder_path_names_joins_ancestors():
     root = SimpleNamespace(id=10, name="资源库", parent=None)
     child = SimpleNamespace(id=11, name="文件资料", parent=root)
     assert folder_path_names(child) == "资源库/文件资料"
+
+
+def test_user_visible_folder_only_keeps_writing_and_resources():
+    writing = SimpleNamespace(id=10, name="写作规范", parent=None)
+    child = SimpleNamespace(id=11, name="风格", parent=writing)
+    resources = SimpleNamespace(id=20, name="资源库", parent=None)
+    agent = SimpleNamespace(id=30, name=AGENT_KB_ROOT_NAME, parent=None)
+    extra = SimpleNamespace(id=40, name="其他", parent=None)
+    assert is_user_visible_folder(writing) is True
+    assert is_user_visible_folder(child) is True
+    assert is_user_visible_folder(resources) is True
+    assert is_user_visible_folder(agent) is False
+    assert is_user_visible_folder(extra) is False
+    assert is_user_visible_folder(None) is False

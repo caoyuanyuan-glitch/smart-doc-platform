@@ -30,6 +30,7 @@ const TranslateHistory = () => import('@/views/TranslateHistory.vue')
 const TranslatePreview = () => import('@/views/TranslatePreview.vue')
 const TranslateStats = () => import('@/views/TranslateStats.vue')
 const Knowledge = () => import('@/views/Knowledge.vue')
+const KnowledgeUsage = () => import('@/views/KnowledgeUsage.vue')
 const PolishPreview = () => import('@/views/PolishPreview.vue')
 const RulesManage = () => import('@/views/RulesManage.vue')
 const SpellCheck = () => import('@/views/SpellCheck.vue')
@@ -67,12 +68,14 @@ const routes = [
   {
     path: '/review/rules',
     name: 'ReviewRules',
-    component: Review
+    component: Review,
+    meta: { adminOnly: true }
   },
   {
     path: '/review/false-positive-memory',
     name: 'FalsePositiveMemory',
-    component: FalsePositiveMemory
+    component: FalsePositiveMemory,
+    meta: { adminOnly: true }
   },
   {
     path: '/review/basis',
@@ -101,12 +104,14 @@ const routes = [
   {
     path: '/polish/stats/text-sessions',
     name: 'PolishTextSessions',
-    component: PolishTextSessions
+    component: PolishTextSessions,
+    meta: { adminOnly: true }
   },
   {
     path: '/polish/stats/document-sessions',
     name: 'PolishDocumentSessions',
-    component: PolishDocumentSessions
+    component: PolishDocumentSessions,
+    meta: { adminOnly: true }
   },
   {
     path: '/polish',
@@ -121,7 +126,8 @@ const routes = [
   {
     path: '/polish/candidates',
     name: 'PolishCandidates',
-    component: PolishLab
+    component: PolishLab,
+    meta: { adminOnly: true }
   },
   {
     path: '/polish-lab',
@@ -157,7 +163,8 @@ const routes = [
   {
     path: '/tools/polish-rules',
     name: 'RulesManage',
-    component: RulesManage
+    component: RulesManage,
+    meta: { adminOnly: true }
   },
   {
     path: '/qa',
@@ -176,7 +183,8 @@ const routes = [
   {
     path: '/qa/dashboard',
     name: 'QADashboard',
-    component: QADashboard
+    component: QADashboard,
+    meta: { adminOnly: true }
   },
   {
     path: '/qa/history',
@@ -185,12 +193,14 @@ const routes = [
   {
     path: '/qa/history/general',
     name: 'QAHistoryGeneral',
-    component: QAHistory
+    component: QAHistory,
+    meta: { adminOnly: true }
   },
   {
     path: '/qa/history/doc',
     name: 'QAHistoryDoc',
-    component: QAHistory
+    component: QAHistory,
+    meta: { adminOnly: true }
   },
   {
     path: '/generate',
@@ -265,7 +275,8 @@ const routes = [
   {
     path: '/users',
     name: 'Users',
-    component: Users
+    component: Users,
+    meta: { adminOnly: true }
   },
   {
     path: '/translate',
@@ -298,6 +309,12 @@ const routes = [
     component: Knowledge
   },
   {
+    path: '/knowledge/stats',
+    name: 'KnowledgeUsage',
+    component: KnowledgeUsage,
+    meta: { adminOnly: true }
+  },
+  {
     path: '/knowledge/:id',
     name: 'KnowledgeFolder',
     component: Knowledge
@@ -305,7 +322,8 @@ const routes = [
   {
     path: '/feedback',
     name: 'Feedback',
-    component: Feedback
+    component: Feedback,
+    meta: { adminOnly: true }
   }
 ]
 
@@ -323,6 +341,18 @@ router.beforeEach((to, from, next) => {
   if (!token) {
     next('/login')
     return
+  }
+  if (to.meta.adminOnly) {
+    let role = ''
+    try {
+      role = JSON.parse(localStorage.getItem('user') || 'null')?.role || ''
+    } catch {
+      role = ''
+    }
+    if (role !== 'admin') {
+      next('/')
+      return
+    }
   }
   next()
 })

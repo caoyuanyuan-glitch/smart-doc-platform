@@ -67,7 +67,10 @@ def apply_user_filters(query, search: str = None, role: str = None, status: str 
             )
         )
     if role:
-        query = query.filter(User.role == role)
+        if role == "user":
+            query = query.filter(User.role.in_(("user", "writer", "reviewer")))
+        else:
+            query = query.filter(User.role == role)
     if status:
         query = query.filter(User.status == status)
     return query

@@ -30,7 +30,7 @@ from app.crud.document import get_document
 from app.crud.polished_document_lab import (
     get_polished_documents, get_polished_document, create_polished_document, delete_polished_document
 )
-from app.api.auth import get_current_user, get_current_user_optional, get_default_user, require_admin
+from app.api.auth import get_current_user, get_current_user_optional, get_current_active_user, get_default_user, require_admin
 from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
 from app.models.polish_feedback_lab import PolishFeedbackLab as PolishFeedback
@@ -43,6 +43,7 @@ from app.crud.polish_learning_rule import get_enabled_engine_keys, get_enabled_c
 from app.crud.term import bulk_create_terms
 from app.utils.typo_dictionary import get_default_typo_dict
 from app.utils.runtime_paths import runtime_knowledge_dir
+from app.utils.knowledge_usage import MODULE_POLISH, record_knowledge_file_call
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -589,10 +590,13 @@ def _load_terminology_source(db: Session, terminology_id: int = None) -> Optiona
     if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
         return None
 
+    started = time.perf_counter()
     if term_file.file_path.lower().endswith('.xlsx'):
-        return term_file.file_path
-
-    return _read_file_safe(term_file.file_path)
+        result = term_file.file_path
+    else:
+        result = _read_file_safe(term_file.file_path)
+    record_knowledge_file_call(term_file.id, MODULE_POLISH, int((time.perf_counter() - started) * 1000))
+    return result
 
 
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
@@ -635,7 +639,10 @@ def _load_file_content(db: Session, file_id: int) -> str:
     kf = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
     if kf and kf.file_path and os.path.exists(kf.file_path):
         try:
-            return _read_knowledge_text_content(kf.file_path).strip()
+            started = time.perf_counter()
+            content = _read_knowledge_text_content(kf.file_path).strip()
+            record_knowledge_file_call(kf.id, MODULE_POLISH, int((time.perf_counter() - started) * 1000))
+            return content
         except Exception:
             pass
     return None
@@ -658,6 +665,13 @@ def _read_knowledge_text_content(file_path: str) -> str:
             except Exception:
                 return ''
     return str(_read_file_safe(path) or '')
+
+
+def _read_and_record_polish_knowledge_file(kf: KnowledgeFile) -> str:
+    started = time.perf_counter()
+    content = _read_knowledge_text_content(kf.file_path)
+    record_knowledge_file_call(kf.id, MODULE_POLISH, int((time.perf_counter() - started) * 1000))
+    return content
 
 
 def _source_file_extension(filename: str) -> str:
@@ -3787,12 +3801,14 @@ def _load_scoped_terminology_source(db: Session, terminology_id: int = None, pro
         if not path or not os.path.exists(path) or path in loaded_paths:
             continue
         loaded_paths.add(path)
+        started = time.perf_counter()
         if path.lower().endswith('.xlsx'):
             sources.append(path)
         else:
             content = _read_file_safe(path)
             if content:
                 sources.append(content)
+        record_knowledge_file_call(term_file.id, MODULE_POLISH, int((time.perf_counter() - started) * 1000))
 
     return "\n\n".join(part for part in sources if part) if sources else None
 
@@ -3819,7 +3835,7 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type:
         style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
         if style_file and style_file.file_path and os.path.exists(style_file.file_path):
             try:
-                content = _prepare_sentence_guide_content(style_file.name, _read_knowledge_text_content(style_file.file_path))
+                content = _prepare_sentence_guide_content(style_file.name, _read_and_record_polish_knowledge_file(style_file))
                 if content.strip():
                     guides.append(content)
                     loaded_paths.add(style_file.file_path)
@@ -3832,7 +3848,7 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type:
             if not os.path.exists(platform_file.file_path):
                 continue
             try:
-                content = _prepare_sentence_guide_content(platform_file.name, _read_knowledge_text_content(platform_file.file_path))
+                content = _prepare_sentence_guide_content(platform_file.name, _read_and_record_polish_knowledge_file(platform_file))
                 if content.strip():
                     guides.append(content)
                     loaded_paths.add(platform_file.file_path)
@@ -3873,7 +3889,7 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type:
     for kf in files:
         if kf.file_path and os.path.exists(kf.file_path):
             try:
-                content = _prepare_sentence_guide_content(kf.name, _read_knowledge_text_content(kf.file_path))
+                content = _prepare_sentence_guide_content(kf.name, _read_and_record_polish_knowledge_file(kf))
                 if content.strip():
                     guides.append(content)
                     loaded_paths.add(kf.file_path)
@@ -3886,7 +3902,7 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type:
         if not os.path.exists(platform_file.file_path):
             continue
         try:
-            content = _prepare_sentence_guide_content(platform_file.name, _read_knowledge_text_content(platform_file.file_path))
+            content = _prepare_sentence_guide_content(platform_file.name, _read_and_record_polish_knowledge_file(platform_file))
             if content.strip():
                 guides.append(content)
         except Exception:
@@ -11076,7 +11092,7 @@ def _cat_calc_file_accuracy(decisions: list, total_paragraphs: int) -> dict:
 
 
 @router.get("/feedback/stats", response_model=None)
-def get_feedback_stats(db: Session = Depends(get_db)):
+def get_feedback_stats(db: Session = Depends(get_db), _: object = Depends(require_admin)):
     """获取润色准确率统计：每条反馈的接受率（accuracy/processed_count*100）取平均。"""
     records = db.query(PolishFeedback).all()
     total = len(records)
@@ -11094,7 +11110,7 @@ def get_feedback_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/feedback/document-stats", response_model=None)
-def get_document_feedback_stats(db: Session = Depends(get_db)):
+def get_document_feedback_stats(db: Session = Depends(get_db), _: object = Depends(require_admin)):
     """获取文档润色页统计。每个文档仅按最新一次反馈计 1 次提交。"""
     records = db.query(PolishFeedback).filter(
         PolishFeedback.target == 'document_sentence_guide'
@@ -11103,7 +11119,7 @@ def get_document_feedback_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/stats/text", response_model=None)
-def get_polish_text_stats(db: Session = Depends(get_db)):
+def get_polish_text_stats(db: Session = Depends(get_db), _: object = Depends(get_current_active_user)):
     records = db.query(PolishFeedback).filter(
         PolishFeedback.target.in_(['terminology', 'sentence_guide'])
     ).order_by(PolishFeedback.created_at.asc(), PolishFeedback.id.asc()).all()
@@ -11196,7 +11212,7 @@ def get_polish_text_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/stats/document", response_model=None)
-def get_polish_document_stats(db: Session = Depends(get_db)):
+def get_polish_document_stats(db: Session = Depends(get_db), _: object = Depends(get_current_active_user)):
     sessions = db.query(CatAnalysisSession).order_by(CatAnalysisSession.created_at.asc(), CatAnalysisSession.id.asc()).all()
     if not sessions:
         return {
@@ -11397,7 +11413,7 @@ def get_polish_document_session_details(
 
 
 @router.get("/stats/document/{analyze_id}", response_model=None)
-def get_polish_document_stats_detail(analyze_id: str, db: Session = Depends(get_db)):
+def get_polish_document_stats_detail(analyze_id: str, db: Session = Depends(get_db), _: object = Depends(require_admin)):
     session_row = db.query(CatAnalysisSession).filter(CatAnalysisSession.analyze_id == analyze_id).first()
     if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -11611,6 +11627,7 @@ def list_diagnose_candidates(
     ruleable: Optional[bool] = Query(None),
     status: Optional[str] = Query("pending"),
     db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
 ):
     from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
 
@@ -11637,7 +11654,7 @@ def import_diagnose_candidate(
     record_id: int,
     body: Optional[DiagnoseImportBody] = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user_optional),
+    _: object = Depends(require_admin),
 ):
     from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
     from app.crud.polish_learning_rule import create_rule, get_rule_by_key
@@ -11701,6 +11718,7 @@ def import_diagnose_candidate(
 def dismiss_diagnose_candidate(
     record_id: int,
     db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
 ):
     from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
 

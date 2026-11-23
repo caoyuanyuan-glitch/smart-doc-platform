@@ -16,7 +16,7 @@
               <el-icon><ArrowDown v-if="!isAllExpanded" /><ArrowRight v-else /></el-icon>
               {{ isAllExpanded ? '收起全部' : '展开全部' }}
             </el-button>
-            <el-button size="small" type="primary" @click="showCreateRootFolder">
+            <el-button v-if="userStore.isAdmin" size="small" type="primary" @click="showCreateRootFolder">
               <el-icon><Plus /></el-icon>
               新建文件夹
             </el-button>
@@ -31,13 +31,11 @@
               :nodes="folderTree"
               :current-folder-id="currentFolderId"
               :expanded-ids="expandedNodeIds"
-              :active-action="activeTreeAction"
+              :context-folder-id="folderMenu.visible ? folderMenu.folder.id : null"
+              :enable-context-menu="canManageKnowledge"
               @toggle="handleToggle"
               @select="handleFolderSelect"
-              @create-sub="handleCreateSubFolderAction"
-              @move="handleMoveFolderAction"
-              @rename="handleRenameFolderAction"
-              @delete="handleDeleteFolderAction"
+              @contextmenu="handleFolderContextMenu"
             />
           </div>
         </div>
@@ -72,6 +70,7 @@
                   <span class="file-count">共 {{ currentFiles.length }} 个文件</span>
                 </div>
                 <el-upload
+                  v-if="canManageKnowledge"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -111,32 +110,28 @@
                     {{ formatDateTime(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="480" fixed="right" align="center">
+                <el-table-column label="操作" :width="canManageKnowledge ? 480 : 120" fixed="right" align="center">
                   <template #default="{ row }">
                     <el-button class="table-action-btn" size="small" @click="handlePreviewFile(row)">
                       <el-icon><View /></el-icon>
                       预览
                     </el-button>
-                    <el-button class="table-action-btn" size="small" :disabled="row.permission === 'read'" @click="handleDownloadFile(row)">
+                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" :disabled="!canDownloadFile(row)" @click="handleDownloadFile(row)">
                       <el-icon><Download /></el-icon>
                       下载
                     </el-button>
-                    <el-button class="table-action-btn" size="small" @click="showMoveFile(row)">
+                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" @click="showMoveFile(row)">
                       <svg class="inline-move-icon" viewBox="0 0 1024 1024" aria-hidden="true">
                         <path fill="currentColor" d="M896 301.653333L618.24 64a77.226667 77.226667 0 0 0-14.933333-11.52L597.333333 50.346667h-2.986666A72.533333 72.533333 0 0 0 567.466667 42.666667H178.773333A72.106667 72.106667 0 0 0 106.666667 114.773333v794.453334A72.106667 72.106667 0 0 0 178.773333 981.333333h298.666667a35.84 35.84 0 0 0 0-71.68h-298.666667V114.773333h354.56v197.12A72.106667 72.106667 0 0 0 605.44 384h240.213333v164.693333a35.84 35.84 0 0 0 71.68 0v-196.266666a72.106667 72.106667 0 0 0-21.333333-50.773334z m-290.986667 10.24V153.173333l199.68 158.72z" />
                         <path fill="currentColor" d="M906.666667 760.32l-98.986667-98.986667a35.84 35.84 0 0 0-50.773333 50.773334l37.973333 37.973333h-384v-85.333333a35.84 35.84 0 0 0-71.68 0v122.026666a35.84 35.84 0 0 0 35.84 35.84h420.266667l-37.973334 37.973334a35.84 35.84 0 0 0 50.773334 50.773333L906.666667 810.666667a35.84 35.84 0 0 0 0-50.346667z" />
                       </svg>
                       移动
                     </el-button>
-                    <el-button v-if="isEditableType(row)" class="table-action-btn" size="small" :disabled="row.permission !== 'edit'" type="warning" @click="openEditDialog(row)">
+                    <el-button v-if="canManageKnowledge && isEditableType(row)" class="table-action-btn" size="small" :disabled="!canEditFile(row)" type="warning" @click="openEditDialog(row)">
                       <el-icon><Edit /></el-icon>
                       编辑
                     </el-button>
-                    <el-button v-if="userStore.isAdmin" class="table-action-btn" size="small" type="info" @click="openPermissionDialog(row)">
-                      <el-icon><Lock /></el-icon>
-                      权限
-                    </el-button>
-                    <el-button class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
+                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
                       <el-icon><Delete /></el-icon>
                       删除
                     </el-button>
@@ -167,6 +162,7 @@
                   <span class="file-count">共 {{ currentSubfolders.length }} 个</span>
                 </div>
                 <el-upload
+                  v-if="canManageKnowledge"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -202,6 +198,7 @@
                   <span class="files-title">文件列表</span>
                 </div>
                 <el-upload
+                  v-if="canManageKnowledge"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -218,7 +215,7 @@
               </div>
               <div class="files-empty-inline">
                 <el-icon :size="36" color="#cbd5e1"><FolderOpened /></el-icon>
-                <p>暂无文件，请上传</p>
+                <p>{{ canManageKnowledge ? '暂无文件，请上传' : '暂无文件' }}</p>
               </div>
             </template>
           </template>
@@ -313,49 +310,31 @@
       </template>
     </el-dialog>
 
-    <!-- 权限管理对话框 -->
-    <el-dialog v-model="permDialogVisible" title="权限管理" width="450px" @closed="closePermDialog">
-      <div v-if="permFile" class="perm-dialog-body">
-        <div class="perm-item">
-          <span class="perm-label">文件名</span>
-          <span class="perm-value">{{ permFile.name }}</span>
-        </div>
-        <div class="perm-item">
-          <span class="perm-label">操作权限</span>
-          <el-select v-model="permPermission" size="small" style="width: 160px">
-            <el-option label="只读" value="read" />
-            <el-option label="编辑" value="edit" />
-            <el-option label="下载" value="download" />
-          </el-select>
-        </div>
-        <div class="perm-item" v-if="permPermission === 'edit'">
-          <span class="perm-label">编辑范围</span>
-          <el-select v-model="permEditScope" size="small" style="width: 160px">
-            <el-option label="所有人" value="all" />
-            <el-option label="上传者" value="owner" />
-            <el-option label="管理员" value="admin" />
-          </el-select>
-        </div>
-        <div class="perm-item" v-if="permPermission !== 'edit'">
-          <span class="perm-label">编辑范围</span>
-          <span class="perm-value perm-disabled">—</span>
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="closePermDialog">取消</el-button>
-        <el-button type="primary" :loading="permSaving" @click="savePermission">保存</el-button>
-      </template>
-    </el-dialog>
+    <teleport to="body">
+      <ul
+        v-if="folderMenu.visible && canManageKnowledge"
+        ref="folderMenuRef"
+        class="folder-context-menu"
+        :style="{ left: folderMenu.x + 'px', top: folderMenu.y + 'px' }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <li v-if="canManageKnowledge" @click="onFolderMenuAction('create-sub')">新建子文件夹</li>
+        <li v-if="canManageKnowledge" @click="onFolderMenuAction('move')">移动</li>
+        <li v-if="canManageKnowledge" @click="onFolderMenuAction('rename')">重命名</li>
+        <li v-if="userStore.isAdmin" class="is-danger" @click="onFolderMenuAction('delete')">删除</li>
+      </ul>
+    </teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Upload, Download, View, Delete, FolderOpened, Document,
-  Plus, ArrowDown, ArrowRight, Edit, Lock
+  Plus, ArrowDown, ArrowRight, Edit
 } from '@element-plus/icons-vue'
 import { knowledgeAPI } from '@/api'
 import { useUserStore } from '@/store/user'
@@ -365,11 +344,22 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
+const canManageKnowledge = computed(() => userStore.isAdmin)
+
+function canDownloadFile(file) {
+  return true
+}
+
+function canEditFile(file) {
+  return true
+}
+
 // -------- 文件夹树 --------
 const folderTree = ref([])
 const currentFolderId = ref(null)
 const expandedNodeIds = ref(new Set())
-const activeTreeAction = ref({ folderId: null, type: '' })
+const folderMenu = ref({ visible: false, x: 0, y: 0, folder: null })
+const folderMenuRef = ref(null)
 
 const isAllExpanded = computed(() => {
   const collectAllIds = (nodes) => {
@@ -488,13 +478,6 @@ const editSaving = ref(false)
 const editError = ref('')
 const isXlsxEdit = ref(false)
 
-// -------- 权限管理 --------
-const permDialogVisible = ref(false)
-const permFile = ref(null)
-const permPermission = ref('edit')
-const permEditScope = ref('all')
-const permSaving = ref(false)
-
 const folderId = computed(() => {
   const id = route.params.id
   return id ? parseInt(id) : null
@@ -557,16 +540,55 @@ function handleToggle(id) {
 }
 
 function handleFolderSelect(folder) {
-  activeTreeAction.value = { folderId: null, type: '' }
   router.push({ path: `/knowledge/${folder.id}` })
 }
 
-function setActiveTreeAction(folderId, type) {
-  activeTreeAction.value = { folderId, type }
+function closeFolderContextMenu() {
+  folderMenu.value = { visible: false, x: 0, y: 0, folder: null }
 }
 
-function clearActiveTreeAction() {
-  activeTreeAction.value = { folderId: null, type: '' }
+function clampFolderMenu() {
+  const el = folderMenuRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  let x = folderMenu.value.x
+  let y = folderMenu.value.y
+  if (x + rect.width > window.innerWidth - 8) {
+    x = Math.max(8, window.innerWidth - rect.width - 8)
+  }
+  if (y + rect.height > window.innerHeight - 8) {
+    y = Math.max(8, window.innerHeight - rect.height - 8)
+  }
+  folderMenu.value.x = x
+  folderMenu.value.y = y
+}
+
+function handleFolderContextMenu({ node, event }) {
+  if (!canManageKnowledge.value) return
+  folderMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    folder: node
+  }
+  nextTick(clampFolderMenu)
+}
+
+function onDocumentPointerDown(event) {
+  if (!folderMenu.value.visible) return
+  const el = folderMenuRef.value
+  if (el && el.contains(event.target)) return
+  closeFolderContextMenu()
+}
+
+function onFolderMenuAction(type) {
+  const folder = folderMenu.value.folder
+  closeFolderContextMenu()
+  if (!folder) return
+  if (type === 'create-sub') handleCreateSubFolderAction(folder.id)
+  else if (type === 'move') handleMoveFolderAction(folder)
+  else if (type === 'rename') handleRenameFolderAction(folder)
+  else if (type === 'delete') handleDeleteFolderAction(folder)
 }
 
 function toggleAllTree() {
@@ -586,7 +608,6 @@ function toggleAllTree() {
 }
 
 function showCreateRootFolder() {
-  clearActiveTreeAction()
   createFolderParentId.value = null
   createFolderName.value = ''
   createFolderVisible.value = true
@@ -599,13 +620,11 @@ function showCreateSubFolder(parentId) {
 }
 
 function handleCreateSubFolderAction(parentId) {
-  setActiveTreeAction(parentId, 'create-sub')
   showCreateSubFolder(parentId)
 }
 
 function closeCreateFolderDialog() {
   createFolderVisible.value = false
-  clearActiveTreeAction()
 }
 
 async function confirmCreateFolder() {
@@ -633,13 +652,11 @@ function showRenameFolder(folder) {
 }
 
 function handleRenameFolderAction(folder) {
-  setActiveTreeAction(folder.id, 'rename')
   showRenameFolder(folder)
 }
 
 function closeRenameFolderDialog() {
   renameFolderVisible.value = false
-  clearActiveTreeAction()
 }
 
 function showMoveFolder(folder) {
@@ -651,7 +668,6 @@ function showMoveFolder(folder) {
 }
 
 function handleMoveFolderAction(folder) {
-  setActiveTreeAction(folder.id, 'move')
   showMoveFolder(folder)
 }
 
@@ -673,7 +689,6 @@ function closeMoveDialog() {
   moveFolderItem.value = null
   moveFileItem.value = null
   moveDestinationId.value = null
-  clearActiveTreeAction()
 }
 
 async function confirmMoveTarget() {
@@ -716,7 +731,6 @@ async function confirmRenameFolder() {
 }
 
 async function handleDeleteFolderAction(folder) {
-  setActiveTreeAction(folder.id, 'delete')
   await showDeleteFolder(folder)
 }
 
@@ -742,8 +756,6 @@ async function showDeleteFolder(folder) {
     if (e !== 'cancel') {
       ElMessage.error('删除失败')
     }
-  } finally {
-    clearActiveTreeAction()
   }
 }
 
@@ -799,6 +811,10 @@ async function loadFolderContent(id) {
 }
 
 async function handleFileChange(file) {
+  if (!canManageKnowledge.value) {
+    ElMessage.warning('审核员不能上传文件')
+    return
+  }
   if (!folderId.value) {
     ElMessage.warning('请先选择文件夹')
     return
@@ -854,41 +870,6 @@ async function handleDeleteFile(file) {
         ElMessage.error('删除文件失败：' + msg)
       }
     }
-  }
-}
-
-// -------- 权限管理 --------
-function openPermissionDialog(file) {
-  permFile.value = file
-  permPermission.value = file.permission || 'edit'
-  permEditScope.value = file.edit_scope || 'all'
-  permDialogVisible.value = true
-}
-
-function closePermDialog() {
-  permDialogVisible.value = false
-  permFile.value = null
-  permSaving.value = false
-}
-
-async function savePermission() {
-  if (!permFile.value) return
-  permSaving.value = true
-  try {
-    const data = { permission: permPermission.value }
-    if (permPermission.value === 'edit') {
-      data.edit_scope = permEditScope.value
-    }
-    await knowledgeAPI.updateFilePermission(permFile.value.id, data)
-    permFile.value.permission = permPermission.value
-    permFile.value.edit_scope = permPermission.value === 'edit' ? permEditScope.value : 'all'
-    ElMessage.success('权限更新成功')
-    closePermDialog()
-  } catch (e) {
-    const msg = e.response?.data?.detail || '未知错误'
-    ElMessage.error('权限更新失败：' + msg)
-  } finally {
-    permSaving.value = false
   }
 }
 
@@ -970,6 +951,15 @@ onMounted(() => {
     currentFolderId.value = folderId.value
     loadFolderContent(folderId.value)
   }
+  document.addEventListener('mousedown', onDocumentPointerDown, true)
+  window.addEventListener('resize', closeFolderContextMenu)
+  window.addEventListener('scroll', closeFolderContextMenu, true)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('mousedown', onDocumentPointerDown, true)
+  window.removeEventListener('resize', closeFolderContextMenu)
+  window.removeEventListener('scroll', closeFolderContextMenu, true)
 })
 </script>
 
@@ -1365,5 +1355,46 @@ onMounted(() => {
 
 .perm-value.perm-disabled {
   color: #d1d5db;
+}
+
+.perm-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6b7280;
+}
+
+.folder-context-menu {
+  position: fixed;
+  z-index: 4000;
+  min-width: 168px;
+  margin: 0;
+  padding: 6px 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+}
+
+.folder-context-menu li {
+  padding: 8px 16px;
+  font-size: 14px;
+  color: #1f2937;
+  cursor: pointer;
+}
+
+.folder-context-menu li:hover {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.folder-context-menu li.is-danger {
+  color: #dc2626;
+}
+
+.folder-context-menu li.is-danger:hover {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 </style>

@@ -14,11 +14,10 @@
           @clear="handleFilterChange"
           @keyup.enter="handleFilterChange"
         />
-        <el-select v-model="roleFilter" placeholder="角色筛选" clearable style="width:140px" @change="handleFilterChange">
-          <el-option label="管理员" value="admin" />
-          <el-option label="技术作者" value="writer" />
-          <el-option label="审核员" value="reviewer" />
-        </el-select>
+          <el-select v-model="roleFilter" placeholder="角色筛选" clearable style="width:140px" @change="handleFilterChange">
+            <el-option label="管理员" value="admin" />
+            <el-option label="普通用户" value="user" />
+          </el-select>
         <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width:120px" @change="handleFilterChange">
           <el-option label="正常" value="active" />
           <el-option label="禁用" value="disabled" />
@@ -35,9 +34,7 @@
         <el-table-column prop="role" label="角色" width="120" sortable>
           <template #default="scope">
             <el-tag v-if="scope.row.role === 'admin'" type="danger" size="small">管理员</el-tag>
-            <el-tag v-else-if="scope.row.role === 'writer'" size="small">技术作者</el-tag>
-            <el-tag v-else-if="scope.row.role === 'reviewer'" type="warning" size="small">审核员</el-tag>
-            <el-tag v-else size="small" type="info">{{ scope.row.role }}</el-tag>
+            <el-tag v-else size="small">普通用户</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="100" sortable>
@@ -92,8 +89,7 @@
         <el-form-item label="角色" prop="role">
           <el-select v-model="addForm.role" style="width:100%">
             <el-option label="管理员" value="admin" />
-            <el-option label="技术作者" value="writer" />
-            <el-option label="审核员" value="reviewer" />
+            <el-option label="普通用户" value="user" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态" prop="status">
@@ -120,8 +116,7 @@
         <el-form-item label="角色" prop="role">
           <el-select v-model="editForm.role" style="width:100%" :disabled="isEditingCurrentUser">
             <el-option label="管理员" value="admin" />
-            <el-option label="技术作者" value="writer" />
-            <el-option label="审核员" value="reviewer" />
+            <el-option label="普通用户" value="user" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态" prop="status">
@@ -189,7 +184,7 @@ const addForm = reactive({
   username: '',
   password: '',
   display_name: '',
-  role: 'writer',
+  role: 'user',
   status: 'active',
 })
 
@@ -260,7 +255,7 @@ function resetFilters() {
 }
 
 function resetAddForm() {
-  Object.assign(addForm, { username: '', password: '', display_name: '', role: 'writer', status: 'active' })
+  Object.assign(addForm, { username: '', password: '', display_name: '', role: 'user', status: 'active' })
   addFormRef.value?.resetFields()
 }
 
