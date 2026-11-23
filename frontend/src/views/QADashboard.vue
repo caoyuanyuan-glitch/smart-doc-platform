@@ -112,30 +112,34 @@
             <span class="sources-title">知识库问答资料清单</span>
           </template>
           <div v-if="sourcesError" class="sources-error">{{ sourcesError }}</div>
-          <div v-for="scene in sourceScenes" :key="scene.key" class="scene-block">
-            <div class="scene-hd">
-              <div>
-                <span class="scene-kicker">{{ scene.kicker }}</span>
-                <span class="scene-title">{{ scene.title }}</span>
-              </div>
-              <span class="scene-count">{{ scene.file_count }} 份资料</span>
-            </div>
-            <el-table
-              :data="scene.files"
-              stripe
-              v-loading="sourcesLoading"
-              :empty-text="sceneEmptyText(scene)"
-              class="detail-table scene-table"
-              @row-click="openSourceFile"
-            >
-              <el-table-column label="文件名" min-width="220" prop="name" show-overflow-tooltip />
-              <el-table-column label="所属目录" min-width="220" prop="folder_path" show-overflow-tooltip />
-              <el-table-column label="类型" width="90" prop="file_type" />
-              <el-table-column label="更新时间" width="180">
-                <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-              </el-table-column>
-            </el-table>
-          </div>
+          <el-collapse class="scene-collapse">
+            <el-collapse-item v-for="scene in sourceScenes" :key="scene.key" :name="scene.key">
+              <template #title>
+                <div class="scene-hd">
+                  <div>
+                    <span class="scene-kicker">{{ scene.kicker }}</span>
+                    <span class="scene-title">{{ scene.title }}</span>
+                  </div>
+                  <span class="scene-count">{{ scene.file_count }} 份资料</span>
+                </div>
+              </template>
+              <el-table
+                :data="scene.files"
+                stripe
+                v-loading="sourcesLoading"
+                :empty-text="sceneEmptyText(scene)"
+                class="detail-table scene-table"
+                @row-click="openSourceFile"
+              >
+                <el-table-column label="文件名" min-width="220" prop="name" show-overflow-tooltip />
+                <el-table-column label="所属目录" min-width="220" prop="folder_path" show-overflow-tooltip />
+                <el-table-column label="类型" width="90" prop="file_type" />
+                <el-table-column label="更新时间" width="180">
+                  <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+                </el-table-column>
+              </el-table>
+            </el-collapse-item>
+          </el-collapse>
         </el-collapse-item>
       </el-collapse>
     </div>
@@ -437,9 +441,7 @@ onMounted(() => {
 .result-none { color: #94a3b8; font-size: 12px; }
 .pagination { margin-top: 16px; display: flex; justify-content: flex-end; }
 .sources-error { color: #b45309; font-size: 13px; margin-bottom: 12px; }
-.scene-block { margin-bottom: 20px; }
-.scene-block:last-child { margin-bottom: 0; }
-.scene-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 4px 0 10px; }
+.scene-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex: 1; padding-right: 12px; }
 .scene-kicker { font-size: 12px; color: #64748b; margin-right: 8px; }
 .scene-title { font-size: 14px; font-weight: 600; color: #1e293b; }
 .scene-count { font-size: 12px; color: #64748b; }
@@ -450,4 +452,8 @@ onMounted(() => {
 .sources-collapse :deep(.el-collapse-item__header) { height: 40px; line-height: 40px; border: none; }
 .sources-collapse :deep(.el-collapse-item__wrap) { border: none; }
 .sources-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }
+.scene-collapse { border: none; }
+.scene-collapse :deep(.el-collapse-item__header) { height: 44px; line-height: 44px; border: none; }
+.scene-collapse :deep(.el-collapse-item__wrap) { border: none; }
+.scene-collapse :deep(.el-collapse-item__content) { padding-bottom: 12px; }
 </style>
