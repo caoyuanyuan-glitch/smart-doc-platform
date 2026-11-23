@@ -2613,6 +2613,13 @@ MANDATORY CONTENT CHECKS (report as serious/fatal when violated, with evidence):
 
 Quality issues such as punctuation habit, spacing, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported ONLY when they affect formatting compliance or operability, and as severity=suggestion. Do not report acceptable, unambiguous variants for padding.
 
+ADJUDICATION PROTOCOL (run before finalizing the severity of ANY issue):
+1. Four checks: (a) consistency claims must compare the SAME object — differences across different standard systems, different models, or different configuration items are NOT inconsistency; (b) search for fallback declarations such as "subject to the actual purchased instrument" or "the following shows the most complete configuration" — such statements greatly weaken any "misleading content" claim; (c) for suspected numeric conflicts, verify arithmetic self-consistency first — when the sum of module-level values (per-module power/dimensions) equals the system-level value, do NOT report a conflict, at most report missing standard/optional labels as severity=suggestion; (d) would the user actually fail to complete the task? If not, downgrade or drop.
+2. Accuracy of standard names, regulatory terms, and product model numbers must NEVER be judged from memory: assign a severity only when the authoritative text is verifiable; otherwise report the doubt with needs_human_review=true and never as a spelling/expression error. Example: GB/T 18268 is officially titled "电设备" while GB/T 42125 uses "电气设备" — different standard families, neither is a typo.
+3. Before claiming a component is leftover from another model, verify functional equivalence: search the literal name first, then search for functionally equivalent or correspondingly named parts and compare their technical parameters; report "naming inconsistency" if an equivalent part exists, and only claim leftover when none does.
+4. For drafts under review: placeholder dates like "YYYY 年 MM 月 xx 日" in revision history and revision highlights/annotations are normal submission markers — do not report "unfinalized placeholder" or "revision marks not cleared", and do not downgrade release-readiness because of them.
+5. The expected field must be backed by the excerpt or an explicit rule. When no evidence-backed correction exists, describe the doubt and set needs_human_review=true; never invent content absent from the excerpt (e.g. a power value or a missing step guessed from common sense).
+
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
 - Do not rewrite text only for readability, tone, or style. Report only objective violations from the checklist or common-error rules.
@@ -2667,7 +2674,8 @@ Output ONLY strict JSON:
       "basis": "review basis or checklist clause used for the judgment",
       "source": "ai",
       "status": "open",
-      "confidence": 50-100
+      "confidence": 50-100,
+      "needs_human_review": false
     }}
   ],
   "observations": [
@@ -2737,6 +2745,13 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 
 标点习惯、空格、缩写展开、动名词形式和风格偏好等质量类问题，仅当影响排版规范或可操作性时才报告，severity=suggestion；不得为凑数而报告无歧义的可接受变体。
 
+裁定程序（每条问题定级前执行）：
+1. 四问自检：① 一致性指控的两个写法是否指向同一对象——不同标准体系、不同型号、不同配置项的写法差异不算"前后不统一"；② 是否存在兜底声明——"以实际购买的仪器为准""以下为最全配置模块"类声明会削弱误导性指控，定级前必须检索；③ 数值矛盾是否加和自洽——各分块参数之和与整机参数一致时不报矛盾，最多按 suggestion 报"分块未标注标配/选配"；④ 用户实际使用是否会失败。
+2. 标准名称、法规术语、产品型号的准确性不得凭常识判错：查得到原文才定级；查不到时照常输出但置 needs_human_review=true 并写明存疑点，严禁按错别字/表述错误定级。
+3. 判定"部件为其他机型残留"前必须验证功能等价性：先检索字面写法，再检索功能等价部件并比对参数；有等价部件改报"命名不统一"。
+4. 过程稿/送审稿：版本记录日期"YYYY 年 MM 月 xx 日"、改动处高亮与批注属送审常态，不报"未定稿占位符"与"修改痕迹未清除"。
+5. expected 必须有原文或规则依据；无法给出有依据的写法时，只描述问题并置 needs_human_review=true，禁止凭空建议补充原文没有的内容。
+
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
@@ -2790,7 +2805,8 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
       "basis": "判断依据或引用的规则条款",
       "source": "ai",
       "status": "open",
-      "confidence": 50-100
+      "confidence": 50-100,
+      "needs_human_review": false
     }}
   ],
   "observations": [
