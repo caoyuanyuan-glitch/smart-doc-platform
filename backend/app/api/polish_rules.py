@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_admin
+
 from app.database import SessionLocal
 from app.crud import polish_learning_rule as crud
 from app.api.polish import _invalidate_typo_cache
@@ -18,7 +20,7 @@ from app.schemas.polish_learning_rule import (
     PolishLearningRuleBatchDelete,
 )
 
-router = APIRouter(prefix="/api/polish-rules", tags=["润色规则管理"])
+router = APIRouter(prefix="/api/polish-rules", tags=["润色规则管理"], dependencies=[Depends(require_admin)])
 
 # 合法的规则分类值
 VALID_RULE_TYPES = {"system_rule", "replacement_rule", "forbidden_rule", "sentence_applicability_rule", "imperative_rule", "format_rule", "typo_rule"}

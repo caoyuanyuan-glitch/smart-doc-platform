@@ -10,18 +10,28 @@
 
     <div class="overview-grid" :class="{ 'overview-grid-single': activeTab === 'text' }">
       <template v-if="activeTab === 'text'">
-        <button type="button" class="stat-card stat-card-button" @click="openTextSessions">
+        <button v-if="userStore.isAdmin" type="button" class="stat-card stat-card-button" @click="openTextSessions">
           <div class="stat-label">文本润色会话</div>
           <div class="stat-value">{{ textStats.overview.total_sessions }}</div>
           <div class="stat-note">最近记录与分类分布</div>
         </button>
+        <div v-else class="stat-card">
+          <div class="stat-label">文本润色会话</div>
+          <div class="stat-value">{{ textStats.overview.total_sessions }}</div>
+          <div class="stat-note">最近记录与分类分布</div>
+        </div>
       </template>
       <template v-else>
-        <button type="button" class="stat-card stat-card-button" @click="openDocumentSessions">
+        <button v-if="userStore.isAdmin" type="button" class="stat-card stat-card-button" @click="openDocumentSessions">
           <div class="stat-label">文档润色数量</div>
           <div class="stat-value">{{ documentStats.overview.total_documents }}</div>
           <div class="stat-note">已统计的文档数量</div>
         </button>
+        <div v-else class="stat-card">
+          <div class="stat-label">文档润色数量</div>
+          <div class="stat-value">{{ documentStats.overview.total_documents }}</div>
+          <div class="stat-note">已统计的文档数量</div>
+        </div>
         <div class="stat-card">
           <div class="stat-label">平均准确率</div>
           <div class="stat-value">{{ formatRate(documentStats.overview.average_accuracy) }}</div>

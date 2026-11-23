@@ -128,10 +128,7 @@ class QaDashboardApiTest(unittest.TestCase):
     def test_regular_user_sees_overview_without_details(self):
         now_utc = datetime.utcnow() - timedelta(seconds=10)
         self._add_turn(now_utc, question="secret-q", answer="secret-a")
-        self.__class__.current_user = SimpleNamespace(id=2, role="writer", username="writer")
+        self.__class__.current_user = SimpleNamespace(id=2, role="user", username="user")
 
-        data = self.client.get("/api/qa/dashboard", params={"period": "today"}).json()
-        self.assertEqual(data["overview"]["conversations"], 1)
-        self.assertTrue(data["charts"]["conversations"])
-        self.assertEqual(data["items"], [])
-        self.assertEqual(data["total"], 0)
+        response = self.client.get("/api/qa/dashboard", params={"period": "today"})
+        self.assertEqual(response.status_code, 403)

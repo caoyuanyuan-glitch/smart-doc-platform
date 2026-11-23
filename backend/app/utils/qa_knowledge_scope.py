@@ -1,6 +1,7 @@
 """Knowledge-base scope helpers for general QA retrieval."""
 
 AGENT_KB_ROOT_NAME = "AI agent知识库"
+USER_VISIBLE_ROOT_NAMES = frozenset({"写作规范", "资源库"})
 
 
 def is_agent_kb_folder(folder) -> bool:
@@ -18,6 +19,31 @@ def is_agent_kb_folder(folder) -> bool:
             return True
         current = getattr(current, "parent", None)
     return False
+
+
+def folder_root(folder):
+    current = folder
+    seen = set()
+    while current is not None:
+        folder_id = getattr(current, "id", None)
+        if folder_id is not None:
+            if folder_id in seen:
+                break
+            seen.add(folder_id)
+        parent = getattr(current, "parent", None)
+        if parent is None:
+            return current
+        current = parent
+    return current
+
+
+def is_user_visible_folder(folder) -> bool:
+    """Return True if the folder lives under 写作规范 or 资源库."""
+    if folder is None:
+        return False
+    root = folder_root(folder)
+    name = getattr(root, "name", None) or ""
+    return name in USER_VISIBLE_ROOT_NAMES
 
 
 def user_root_folder_ids(folders) -> list:

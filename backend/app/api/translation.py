@@ -47,6 +47,7 @@ from app.utils.ai_client import ai_client
 from app.utils.file_utils import read_file_safe
 from app.utils.runtime_paths import runtime_memory_seed_dir, repo_seed_dir
 from app.schemas.user import UserOut
+from app.utils.knowledge_usage import MODULE_TRANSLATION, record_knowledge_file_call
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
@@ -2029,6 +2030,7 @@ def _load_memory_file_entries(file_path: str, file_type: str):
 
 
 def _get_cached_memory_file_entries(memory_file: KnowledgeFile):
+    started = time.perf_counter()
     cache_key = (
         memory_file.id,
         memory_file.updated_at.isoformat() if memory_file.updated_at else "",
@@ -2036,11 +2038,15 @@ def _get_cached_memory_file_entries(memory_file: KnowledgeFile):
     )
     with _memory_file_cache_lock:
         if cache_key in _memory_file_cache:
-            return _memory_file_cache[cache_key]
+            entries = _memory_file_cache[cache_key]
+        else:
+            entries = None
 
-    entries = _load_memory_file_entries(memory_file.file_path, memory_file.file_type or "")
-    with _memory_file_cache_lock:
-        _memory_file_cache[cache_key] = entries
+    if entries is None:
+        entries = _load_memory_file_entries(memory_file.file_path, memory_file.file_type or "")
+        with _memory_file_cache_lock:
+            _memory_file_cache[cache_key] = entries
+    record_knowledge_file_call(memory_file.id, MODULE_TRANSLATION, int((time.perf_counter() - started) * 1000))
     return entries
 
 

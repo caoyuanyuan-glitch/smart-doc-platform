@@ -20,6 +20,13 @@ from app.api.auth import get_current_active_user, require_admin
 from app.utils.file_utils import read_file_safe
 from app.utils.runtime_paths import runtime_knowledge_dir
 from app.api.translation import persist_memory_library_seed_if_needed
+from app.utils.qa_knowledge_scope import USER_VISIBLE_ROOT_NAMES, is_user_visible_folder
+from app.utils.knowledge_usage import (
+    VALID_MODULES,
+    parse_beijing_day_range,
+    query_usage_details,
+    query_usage_summary,
+)
 
 PERMISSION_READ = "read"
 PERMISSION_EDIT = "edit"
@@ -27,34 +34,48 @@ PERMISSION_DOWNLOAD = "download"
 VALID_PERMISSIONS = {PERMISSION_READ, PERMISSION_EDIT, PERMISSION_DOWNLOAD}
 VALID_EDIT_SCOPES = {"admin", "owner", "all"}
 
-def check_download_permission(file):
-    if file.permission == PERMISSION_READ:
-        raise HTTPException(status_code=403, detail="该文件仅限只读，不支持下载")
+
+def _is_admin(user) -> bool:
+    return getattr(user, "role", None) == "admin"
+
+
+def check_download_permission(file, user=None):
+    return
 
 def check_edit_permission(file, user):
-    if file.permission != PERMISSION_EDIT:
-        raise HTTPException(status_code=403, detail="该文件不支持编辑操作")
-    scope = file.edit_scope or "all"
-    if scope == "admin" and user.role != "admin":
-        raise HTTPException(status_code=403, detail="该文件仅限管理员编辑")
-    if scope == "owner" and user.role != "admin" and user.id != file.created_by:
-        raise HTTPException(status_code=403, detail="该文件仅限上传者和管理员编辑")
+    if not _can_access_knowledge_file(file, user):
+        raise HTTPException(status_code=404, detail="文件不存在")
 
 
 def _can_access_knowledge_file(file: KnowledgeFile, current_user: UserOut) -> bool:
-    return current_user.role == "admin" or file.created_by == current_user.id
+    if _is_admin(current_user):
+        return True
+    return is_user_visible_folder(getattr(file, "folder", None))
+
+
+def _can_access_folder(folder: Folder, current_user: UserOut) -> bool:
+    if folder is None:
+        return False
+    if _is_admin(current_user):
+        return True
+    return is_user_visible_folder(folder)
+
+
+def _ensure_folder_visible(folder, current_user):
+    if not _can_access_folder(folder, current_user):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+
+def _ensure_can_mutate_folder(folder, current_user, *, creating_root=False):
+    if creating_root:
+        if not _is_admin(current_user):
+            raise HTTPException(status_code=403, detail="仅管理员可新建根文件夹")
+        return
+    _ensure_folder_visible(folder, current_user)
 
 
 def _folder_has_visible_content(folder: Folder, current_user: UserOut) -> bool:
-    if current_user.role == "admin" or folder.created_by == current_user.id:
-        return True
-    for file in folder.files:
-        if _can_access_knowledge_file(file, current_user):
-            return True
-    for child in folder.children:
-        if _folder_has_visible_content(child, current_user):
-            return True
-    return False
+    return _can_access_folder(folder, current_user)
 
 
 def _require_knowledge_file_access(db: Session, file_id: int, current_user: UserOut, action: str = "read"):
@@ -64,33 +85,21 @@ def _require_knowledge_file_access(db: Session, file_id: int, current_user: User
     if not _can_access_knowledge_file(file, current_user):
         raise HTTPException(status_code=404, detail="文件不存在")
     if action == "download":
-        check_download_permission(file)
+        check_download_permission(file, current_user)
     elif action == "edit":
         check_edit_permission(file, current_user)
     return file
 
 
 def _build_visible_tree_nodes(nodes, current_user: UserOut):
-    visible_nodes = []
-    for node in nodes:
-        children = _build_visible_tree_nodes(node.get("children", []), current_user)
-        files = [
-            file for file in node.get("files", [])
-            if current_user.role == "admin" or file.get("created_by") == current_user.id
-        ]
-        if current_user.role == "admin" or node.get("created_by") == current_user.id or children or files:
-            next_node = dict(node)
-            next_node["children"] = children
-            next_node["files"] = files
-            visible_nodes.append(next_node)
-    return visible_nodes
+    if _is_admin(current_user):
+        return nodes
+    return [node for node in nodes if node.get("name") in USER_VISIBLE_ROOT_NAMES]
 
 
 def _build_visible_folder_payload(folder: Folder, current_user: UserOut):
     subfolders = []
     for child in folder.children:
-        if not _folder_has_visible_content(child, current_user):
-            continue
         subfolders.append({
             "id": child.id,
             "name": child.name,
@@ -102,8 +111,6 @@ def _build_visible_folder_payload(folder: Folder, current_user: UserOut):
 
     files = []
     for file in folder.files:
-        if not _can_access_knowledge_file(file, current_user):
-            continue
         files.append({
             "id": file.id,
             "name": file.name,
@@ -212,6 +219,10 @@ async def create_new_folder(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
+    parent = get_folder(db, folder.parent_id) if folder.parent_id else None
+    if folder.parent_id and not parent:
+        raise HTTPException(status_code=404, detail="父文件夹不存在")
+    _ensure_can_mutate_folder(parent, current_user, creating_root=folder.parent_id is None)
     db_folder = create_folder(db, folder, current_user.id)
     return {"message": "文件夹创建成功", "id": db_folder.id}
 
@@ -222,12 +233,14 @@ async def update_folder_name(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
+    folder = get_folder(db, folder_id)
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    _ensure_can_mutate_folder(folder, current_user)
     if not folder_update.name:
         raise HTTPException(status_code=400, detail="文件夹名称不能为空")
     
     folder = update_folder(db, folder_id, folder_update.name)
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在")
     
     return {"message": "文件夹重命名成功"}
 
@@ -242,6 +255,7 @@ async def move_folder_to_target(
     folder = get_folder(db, folder_id)
     if not folder:
         raise HTTPException(status_code=404, detail="文件夹不存在")
+    _ensure_can_mutate_folder(folder, current_user)
 
     target_parent_id = folder_move.parent_id
     if target_parent_id == folder.id:
@@ -251,13 +265,49 @@ async def move_folder_to_target(
         target_folder = get_folder(db, target_parent_id)
         if not target_folder:
             raise HTTPException(status_code=404, detail="目标文件夹不存在")
+        _ensure_folder_visible(target_folder, current_user)
 
         descendant_ids = _collect_descendant_ids(folder)
         if target_parent_id in descendant_ids:
             raise HTTPException(status_code=400, detail="不能移动到当前文件夹的子文件夹中")
+    elif not _is_admin(current_user):
+        raise HTTPException(status_code=403, detail="仅管理员可将文件夹移动到根目录")
 
     move_folder(db, folder_id, target_parent_id)
     return {"message": "文件夹移动完成", "id": folder_id, "parent_id": target_parent_id}
+
+
+@router.put("/folders/{folder_id}/permission")
+async def update_folder_permission(
+    folder_id: int,
+    req: FilePermissionRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_admin)
+):
+    folder = get_folder(db, folder_id)
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    if req.permission is not None and req.permission not in VALID_PERMISSIONS:
+        raise HTTPException(status_code=400, detail=f"无效的权限值，合法值：{', '.join(VALID_PERMISSIONS)}")
+    if req.edit_scope is not None and req.edit_scope not in VALID_EDIT_SCOPES:
+        raise HTTPException(status_code=400, detail=f"无效的操作者范围，合法值：{', '.join(VALID_EDIT_SCOPES)}")
+
+    folder_ids = {folder.id}
+    folder_ids.update(_collect_descendant_ids(folder))
+    files = db.query(KnowledgeFile).filter(KnowledgeFile.folder_id.in_(folder_ids)).all()
+    for file in files:
+        if req.permission is not None:
+            file.permission = req.permission
+        if req.edit_scope is not None:
+            file.edit_scope = req.edit_scope
+    db.commit()
+
+    return {
+        "message": "权限更新成功",
+        "updated_count": len(files),
+        "permission": req.permission,
+        "edit_scope": req.edit_scope,
+    }
 
 @router.delete("/folders/{folder_id}")
 async def delete_folder_by_id(
@@ -292,6 +342,7 @@ async def upload_file_to_folder(
     folder = get_folder(db, folder_id) if folder_id else None
     if folder_id and not folder:
         raise HTTPException(status_code=404, detail="文件夹不存在")
+    _ensure_can_mutate_folder(folder, current_user, creating_root=not folder_id)
     
     file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
     import uuid
@@ -358,10 +409,12 @@ async def move_file_to_target(
     file = get_file(db, file_id)
     if not file:
         raise HTTPException(status_code=404, detail="文件不存在")
-
+    if not _can_access_knowledge_file(file, current_user):
+        raise HTTPException(status_code=404, detail="文件不存在")
     target_folder = get_folder(db, file_move.folder_id)
     if not target_folder:
         raise HTTPException(status_code=404, detail="目标文件夹不存在")
+    _ensure_folder_visible(target_folder, current_user)
 
     move_file(db, file_id, file_move.folder_id)
     moved_file = get_file(db, file_id)
@@ -606,6 +659,8 @@ async def delete_file_by_id(
     if not file:
         raise HTTPException(status_code=404, detail="文件不存在")
     
+    if not _can_access_knowledge_file(file, current_user):
+        raise HTTPException(status_code=404, detail="文件不存在")
     if current_user.role != "admin" and file.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="仅管理员或创建者可删除文件")
     
@@ -627,3 +682,51 @@ async def export_knowledge_to_seed(
         return {"message": "知识库已导出到 seed/knowledge/ 目录，请执行 git add/commit/push 分享给团队"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
+
+
+def _parse_usage_filters(module: Optional[str], start: Optional[str], end: Optional[str]):
+    if module and module not in VALID_MODULES:
+        raise HTTPException(status_code=400, detail="无效的调用模块")
+    try:
+        start_dt, end_dt = parse_beijing_day_range(start, end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式需为 YYYY-MM-DD")
+    return module, start_dt, end_dt
+
+
+@router.get("/usage/summary")
+async def get_knowledge_usage_summary(
+    module: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(require_admin),
+):
+    module, start_dt, end_dt = _parse_usage_filters(module, start, end)
+    return query_usage_summary(db, module=module, start=start_dt, end=end_dt, keyword=q)
+
+
+@router.get("/usage/files/{file_id}")
+async def get_knowledge_usage_file_details(
+    file_id: int,
+    module: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(require_admin),
+):
+    module, start_dt, end_dt = _parse_usage_filters(module, start, end)
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    return query_usage_details(
+        db,
+        file_id,
+        module=module,
+        start=start_dt,
+        end=end_dt,
+        offset=offset,
+        limit=limit,
+    )

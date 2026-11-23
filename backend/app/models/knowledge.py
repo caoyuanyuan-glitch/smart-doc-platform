@@ -34,3 +34,15 @@ class KnowledgeFile(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     folder = relationship("Folder", back_populates="files")
+
+
+class KnowledgeFileCall(Base):
+    __tablename__ = "knowledge_file_calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, index=True, nullable=False)
+    module = Column(String, nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    username = Column(String, default="guest")
+    duration_ms = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

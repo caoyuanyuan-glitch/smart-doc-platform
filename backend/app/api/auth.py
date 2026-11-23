@@ -17,7 +17,8 @@ router = APIRouter()
 
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
 PASSWORD_PATTERN = re.compile(r"^\S{8,32}$")
-VALID_ROLES = {"admin", "writer", "reviewer"}
+VALID_ROLES = {"admin", "user"}
+LEGACY_ROLES = {"writer": "user", "reviewer": "user"}
 VALID_STATUS = {"active", "disabled"}
 
 DEFAULT_SECRET_KEY = "smart-doc-dev-secret-change-me"
@@ -142,8 +143,13 @@ def normalize_display_name(display_name: str) -> str:
     return normalized
 
 
-def validate_role(role: str) -> str:
+def canonicalize_role(role: str) -> str:
     normalized = (role or "").strip()
+    return LEGACY_ROLES.get(normalized, normalized)
+
+
+def validate_role(role: str) -> str:
+    normalized = canonicalize_role(role)
     if normalized not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="角色值无效")
     return normalized
@@ -168,6 +174,11 @@ async def login_for_access_token(
     user = user_crud.authenticate_user(db, username, password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    canon_role = canonicalize_role(user.role)
+    if user.role != canon_role:
+        user.role = canon_role
+        db.commit()
+        db.refresh(user)
     access_token = create_access_token(
         data={"sub": user.username},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
