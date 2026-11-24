@@ -1,4 +1,5 @@
 """知识库种子脚本：从 seed/knowledge/ 目录增量同步到数据库和文件系统"""
+import filecmp
 import os
 import shutil
 import uuid
@@ -35,14 +36,15 @@ SUPPORTED_SEED_FILE_TYPES = {
 
 
 def seed_knowledge_base():
-    """增量同步：种子目录中的文件夹/文件如在 DB 中不存在则创建，已存在则跳过。"""
+    """增量同步：种子目录中的文件夹/文件在 DB 中不存在则创建，内容有变化则覆盖更新。"""
     db = SessionLocal()
     try:
         _merge_runtime_memory_seed_into_repo_seed()
-        created = _sync_from_seed(db, SEED_DIR, parent_id=None, parent_path="")
-        if created:
+        stats = {"created": 0, "updated": 0}
+        _sync_from_seed(db, SEED_DIR, parent_id=None, parent_path="", stats=stats)
+        if stats["created"] or stats["updated"]:
             db.commit()
-            print(f"[seed] 增量同步完成，新增 {created} 个条目")
+            print(f"[seed] 增量同步完成：新增 {stats['created']}，更新 {stats['updated']}")
         else:
             print("[seed] 知识库已是最新，无新增条目")
     except Exception as e:
@@ -65,9 +67,8 @@ def _merge_runtime_memory_seed_into_repo_seed():
         shutil.copy2(source, target)
 
 
-def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, parent_path: str) -> int:
-    """递归遍历种子目录，创建 DB 中不存在的条目。返回新增数量。"""
-    created = 0
+def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, parent_path: str, stats: dict) -> None:
+    """递归遍历种子目录：缺失条目创建，已存在但内容变化则覆盖。"""
     os.makedirs(TARGET_DIR, exist_ok=True)
 
     for entry in sorted(current_dir.iterdir()):
@@ -92,11 +93,11 @@ def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, paren
                 db.add(folder)
                 db.flush()
                 folder_id = folder.id
-                created += 1
+                stats["created"] += 1
 
             # 递归子目录
             child_path = f"{parent_path}/{entry.name}" if parent_path else entry.name
-            created += _sync_from_seed(db, entry, parent_id=folder_id, parent_path=child_path)
+            _sync_from_seed(db, entry, parent_id=folder_id, parent_path=child_path, stats=stats)
 
         elif entry.is_file():
             suffix = entry.suffix.lower()
@@ -109,29 +110,39 @@ def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, paren
                 KnowledgeFile.folder_id == parent_id
             ).first()
 
-            if not existing_file:
-                unique_name = f"{uuid.uuid4()}{suffix}"
-                target_path = TARGET_DIR / unique_name
+            if existing_file:
+                target_path = Path(existing_file.file_path) if existing_file.file_path else None
+                if target_path is None:
+                    continue
+                if target_path.exists() and filecmp.cmp(entry, target_path, shallow=False):
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(entry, target_path)
+                existing_file.file_size = os.path.getsize(target_path)
+                existing_file.file_type = suffix.lstrip(".")
+                stats["updated"] += 1
+                continue
 
-                file_record = KnowledgeFile(
-                    name=entry.name,
-                    folder_id=parent_id,
-                    filename=unique_name,
-                    file_path=str(target_path),
-                    file_size=os.path.getsize(target_path),
-                    file_type=suffix.lstrip("."),
-                    created_by=1
-                )
-                db.add(file_record)
-                created += 1
+            unique_name = f"{uuid.uuid4()}{suffix}"
+            target_path = TARGET_DIR / unique_name
+            shutil.copy2(entry, target_path)
 
-    return created
+            file_record = KnowledgeFile(
+                name=entry.name,
+                folder_id=parent_id,
+                filename=unique_name,
+                file_path=str(target_path),
+                file_size=os.path.getsize(target_path),
+                file_type=suffix.lstrip("."),
+                created_by=1
+            )
+            db.add(file_record)
+            stats["created"] += 1
 
 
 def export_kb_to_seed():
     """将数据库中的知识库导出到种子目录，用于团队共享。
-    
+
     此函数会：
     1. 清空 seed/knowledge 下的旧内容（保留 .gitkeep）
     2. 根据 DB 中的文件夹/文件重建种子目录结构
@@ -139,20 +150,30 @@ def export_kb_to_seed():
     """
     db = SessionLocal()
     try:
-        # 清空种子目录（保留 .gitkeep 和 .git 目录）
+        folder_total = db.query(Folder).count()
+        file_total = db.query(KnowledgeFile).count()
+        if folder_total == 0 and file_total == 0:
+            raise RuntimeError("知识库为空，已中止导出以避免清空种子目录")
+
+        stats = {"copied": 0, "missing": 0}
+
+        # 清空种子目录：仅删除种子同步管理的文件类型，保留 .gitkeep
+        # 与非白名单类型（如手工维护的 .json 参考文件），避免误删仓库内容
         for root, dirs, files in os.walk(str(SEED_DIR), topdown=False):
             for name in files:
                 if name == ".gitkeep":
                     continue
+                if Path(name).suffix.lower() not in SUPPORTED_SEED_FILE_TYPES:
+                    continue
                 os.remove(os.path.join(root, name))
-        
+
         # 重建种子目录：复制 DB 文件夹结构
         root_folders = db.query(Folder).filter(Folder.parent_id == None).all()
         all_folder_ids = {f.id for f in db.query(Folder).all()}
-        
+
         for folder in root_folders:
-            _export_folder(db, folder, SEED_DIR)
-        
+            _export_folder(db, folder, SEED_DIR, stats)
+
         # 处理孤儿文件夹（parent_id 指向不存在的文件夹）
         orphans = db.query(Folder).filter(
             Folder.parent_id != None,
@@ -162,13 +183,14 @@ def export_kb_to_seed():
             orphan_dir = SEED_DIR / "_orphaned"
             orphan_dir.mkdir(parents=True, exist_ok=True)
             for folder in orphans:
-                _export_folder(db, folder, orphan_dir)
+                _export_folder(db, folder, orphan_dir, stats)
                 # 修正孤儿的 parent_id 为 None
                 folder.parent_id = None
             print(f"[seed] 已处理 {len(orphans)} 个孤儿文件夹")
-        
+
         db.commit()
-        print(f"[seed] 知识库已导出到种子目录 {SEED_DIR}")
+        print(f"[seed] 知识库已导出到种子目录 {SEED_DIR}：复制 {stats['copied']} 个文件，缺失 {stats['missing']} 个")
+        return stats
     except Exception as e:
         db.rollback()
         print(f"[seed] 导出失败: {e}")
@@ -177,25 +199,29 @@ def export_kb_to_seed():
         db.close()
 
 
-def _export_folder(db: Session, folder, parent_seed_dir: Path):
+def _export_folder(db: Session, folder, parent_seed_dir: Path, stats: dict):
     """递归导出单个文件夹及其下文件到种子目录"""
     folder_dir = parent_seed_dir / folder.name
     folder_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 导出该文件夹下的文件
     files = db.query(KnowledgeFile).filter(KnowledgeFile.folder_id == folder.id).all()
     has_content = False
     for kf in files:
         if os.path.exists(kf.file_path):
             shutil.copy2(kf.file_path, folder_dir / kf.name)
+            stats["copied"] += 1
             has_content = True
-    
+        else:
+            stats["missing"] += 1
+            print(f"[seed] 文件本体缺失，已跳过：{kf.name} <- {kf.file_path}")
+
     # 递归子文件夹
     subfolders = db.query(Folder).filter(Folder.parent_id == folder.id).all()
     for sub in subfolders:
-        _export_folder(db, sub, folder_dir)
+        _export_folder(db, sub, folder_dir, stats)
         has_content = True
-    
+
     # 空文件夹加 .gitkeep 确保 Git 追踪
     if not has_content:
         (folder_dir / ".gitkeep").touch()

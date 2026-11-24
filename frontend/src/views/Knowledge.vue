@@ -20,6 +20,15 @@
               <el-icon><Plus /></el-icon>
               新建文件夹
             </el-button>
+            <el-button
+              v-if="userStore.isAdmin"
+              size="small"
+              :loading="exportingSeed"
+              @click="handleExportSeed"
+            >
+              <el-icon><Download /></el-icon>
+              导出到仓库
+            </el-button>
           </div>
           <div class="tree-container">
             <div v-if="folderTree.length === 0" class="tree-empty">
@@ -472,6 +481,7 @@ function buildMoveTree(nodes, excludedIds) {
 const createFolderVisible = ref(false)
 const createFolderName = ref('')
 const createFolderParentId = ref(null)
+const exportingSeed = ref(false)
 
 const renameFolderVisible = ref(false)
 const renameFolderName = ref('')
@@ -638,6 +648,33 @@ function showCreateRootFolder() {
   createFolderParentId.value = null
   createFolderName.value = ''
   createFolderVisible.value = true
+}
+
+async function handleExportSeed() {
+  try {
+    await ElMessageBox.confirm(
+      '将当前知识库的文件夹结构和文件内容导出到仓库的 backend/seed/knowledge/ 目录，导出后需自行 git add/commit/push。是否继续？',
+      '导出到仓库',
+      { confirmButtonText: '导出', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch (e) {
+    return
+  }
+  exportingSeed.value = true
+  try {
+    const resp = await knowledgeAPI.exportSeed()
+    const copied = resp.data?.copied ?? 0
+    const missing = resp.data?.missing ?? 0
+    if (missing > 0) {
+      ElMessage.warning(`已导出 ${copied} 个文件，${missing} 个文件本体缺失已跳过`)
+    } else {
+      ElMessage.success(`已导出 ${copied} 个文件到种子目录`)
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '导出失败')
+  } finally {
+    exportingSeed.value = false
+  }
 }
 
 function showCreateSubFolder(parentId) {

@@ -792,13 +792,17 @@ async def delete_file_by_id(
 
 @router.post("/export-seed")
 async def export_knowledge_to_seed(
-    current_user = Depends(get_current_active_user)
+    current_user = Depends(require_admin)
 ):
     """将知识库导出到种子目录，用于 Git 提交后团队共享"""
     from seed.knowledge_seed import export_kb_to_seed
     try:
-        export_kb_to_seed()
-        return {"message": "知识库已导出到 seed/knowledge/ 目录，请执行 git add/commit/push 分享给团队"}
+        stats = export_kb_to_seed()
+        return {
+            "message": "知识库已导出到 seed/knowledge/ 目录，请执行 git add/commit/push 分享给团队",
+            "copied": stats["copied"],
+            "missing": stats["missing"],
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
 

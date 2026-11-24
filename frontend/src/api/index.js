@@ -526,6 +526,7 @@ export const knowledgeAPI = {
   getGrantTree: () => instance.get('/knowledge/grant-tree'),
   getUserGrants: (userId) => instance.get(`/knowledge/users/${userId}/grants`),
   updateUserGrants: (userId, data) => instance.put(`/knowledge/users/${userId}/grants`, data),
+  exportSeed: () => instance.post('/knowledge/export-seed'),
   getUsageSummary: (params = {}) => instance.get('/knowledge/usage/summary', { params }),
   getUsageFileDetails: (fileId, params = {}) => instance.get(`/knowledge/usage/files/${fileId}`, { params })
 }
