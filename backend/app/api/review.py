@@ -2679,7 +2679,11 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                     _orig = str(_issue_value(issue, 'original_text', '') or '')
                     _local = -1
                     if _orig:
-                        _local = chunk.find(_orig)
+                        # 同块多 occurrence 消歧：用 context 邻域相似度选定位点，
+                        # 裸 find 总取首个会让 TOC 与正文的同词问题共享同一坐标
+                        _local = _locate_issue_in_chunk(
+                            chunk, _orig, str(_issue_value(issue, 'context', '') or '')
+                        )
                         if _local < 0:
                             _tokens = _orig.split()
                             if len(_tokens) >= 3:
@@ -2785,8 +2789,80 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     return all_issues, trace
 
 
+def _issue_char_span(issue):
+    """从 position 提取全文级 char 跨度 (char_start, char_end)；无有效定位返回 None。
+
+    同词多 occurrence 折叠修复的关键：AI 通道 issue 在 chunk 循环里由 M6 补丁
+    写入 char_start/char_end（块内偏移 + 块起始），去重发生时页码尚未回填，
+    但 char 跨度已经可用——位置明确不相交即为不同 occurrence，不得折叠。
+    """
+    position = (issue or {}).get("position")
+    if isinstance(position, str):
+        try:
+            position = json.loads(position)
+        except Exception:
+            return None
+    if not isinstance(position, dict):
+        return None
+    try:
+        start = int(position.get("char_start"))
+        end = int(position.get("char_end"))
+    except (TypeError, ValueError):
+        return None
+    if end < start:
+        start, end = end, start
+    return (start, end)
+
+
+def _char_spans_disjoint(a, b) -> bool:
+    """两条 char 跨度是否明确不相交（80 字符容差，防同段落紧邻误判）。
+
+    任一方跨度未知返回 False（保守：按可能重复处理）。
+    """
+    if not a or not b:
+        return False
+    slack = 80
+    return a[1] + slack < b[0] or b[1] + slack < a[0]
+
+
+def _locate_issue_in_chunk(chunk: str, original_text: str, context: str = "") -> int:
+    """在 chunk 内定位 original_text，返回块内偏移；找不到返回 -1。
+
+    同块多次出现时不再无脑取首个（M6 原实现），而是用 AI 返回的 context
+    与各 occurrence 邻域做相似度匹配，选最贴合的一次——否则 TOC 与正文
+    同词问题永远定位到同一处，页码与去重全部失真。
+    """
+    if not original_text:
+        return -1
+    first = chunk.find(original_text)
+    if first < 0:
+        return -1
+    if chunk.count(original_text) <= 1:
+        return first
+    ctx = str(context or "").strip()
+    if len(ctx) < 30:
+        return first
+    best, best_score = first, -1.0
+    pos = 0
+    while True:
+        i = chunk.find(original_text, pos)
+        if i < 0:
+            break
+        lo = max(0, i - 120)
+        hi = min(len(chunk), i + len(original_text) + 120)
+        score = difflib.SequenceMatcher(None, chunk[lo:hi], ctx).ratio()
+        if score > best_score:
+            best_score, best = score, i
+        pos = i + 1
+    return best
+
+
 def _dedup_across_chunks(issues: list) -> list:
-    """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。"""
+    """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。
+
+    身份键相同时还需 char 跨度相交才算同一 occurrence——同词出现在不同
+    分块（如 TOC 与正文标题、同一操作在两页重复）是两个独立问题，各自保留。
+    """
     if len(issues) <= 1:
         return issues
     from app.review_engine.matching.identity import issue_identity_key
@@ -2801,6 +2877,9 @@ def _dedup_across_chunks(issues: list) -> list:
         matched = False
         for existing in result:
             if issue_identity_key(existing) != key:
+                continue
+            if _char_spans_disjoint(_issue_char_span(existing), _issue_char_span(issue)):
+                # 位置明确不相交 = 不同 occurrence，保留为独立问题
                 continue
             keep_id = existing.get("candidate_id") or existing.get("rule") or ""
             existing["dedupe_reason"] = "same_identity_key"
@@ -13314,6 +13393,9 @@ def dedupe_issues_by_original(issues):
             issue_page = key[3]
             if existing_page and issue_page and existing_page != issue_page:
                 continue
+            if _char_spans_disjoint(_issue_char_span(existing), _issue_char_span(issue)):
+                # char 跨度明确不相交 = 同词两次独立出现，不折叠
+                continue
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
                 and issue_chapter == existing_chapter
@@ -13478,13 +13560,16 @@ def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list
     # ── 跨模型去重 ──
     # 策略：基于 original_text 的 Jaccard 相似度去重
     # 保留第一个遇到的，并记录所有标记该问题的 provider
+    # occurrence 守卫：original_text 相同但 char 跨度明确不相交是同词的
+    # 两次独立出现（如 Enzymefrom 在 p90 与 p105），保留两条，各自记账。
     deduped = []
     for issue in merged:
         ot = (issue.get("original_text") or "").strip().lower()
         if not ot:
             deduped.append(issue)
             continue
-        
+
+        issue_span = _issue_char_span(issue)
         # 检查是否与已有问题重复
         is_dup = False
         for existing in deduped:
@@ -13493,11 +13578,15 @@ def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list
                 continue
             # 完全相同 or 高度重叠（一个包含另一个且长度比 > 0.7）
             if ot == existing_ot:
+                if _char_spans_disjoint(issue_span, _issue_char_span(existing)):
+                    continue  # 不同 occurrence，不折叠
                 is_dup = True
             elif len(ot) > 10 and len(existing_ot) > 10:
                 shorter = ot if len(ot) <= len(existing_ot) else existing_ot
                 longer = existing_ot if len(ot) <= len(existing_ot) else ot
                 if shorter in longer and len(shorter) / len(longer) > 0.7:
+                    if _char_spans_disjoint(issue_span, _issue_char_span(existing)):
+                        continue  # 不同 occurrence，不折叠
                     is_dup = True
             
             if is_dup:
