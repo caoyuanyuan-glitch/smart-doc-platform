@@ -14006,6 +14006,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
                     if document.file_type == 'pdf' and not snippet_review:
                         try:
+                            from app.review_engine.pdf_char_spacing import detect_render_tight_units
+                            spacing_issues = detect_render_tight_units(_get_document_upload_path(document))
+                            if spacing_issues:
+                                print(f"[审核] PDF 渲染层字符间距(数字-单位紧贴)发现问题: {len(spacing_issues)}个")
+                                rule_issues.extend(spacing_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 渲染层字符间距规则执行失败: {e}")
+                        try:
                             from app.review_engine.pdf_table_continuity import check_pdf_table_continuity
                             table_cont_issues = check_pdf_table_continuity(_get_document_upload_path(document))
                             if table_cont_issues:
