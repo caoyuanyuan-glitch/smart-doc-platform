@@ -57,6 +57,7 @@ from app.review_engine.canonical_writing import check_canonical_writing
 from app.review_engine.cn_typo import check_cn_typos
 from app.review_engine.learned_patch import check_learned_patches
 from app.review_engine.cn_format_consistency import check_cn_format_consistency
+from app.review_engine.en_format_consistency import check_en_format_consistency
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -2292,12 +2293,44 @@ def _is_zh_en_spacing_false_positive(issue):
     return bool(re.search(r'(空格|space|spacing)', normalized))
 
 
+# 确定性规则 ID 白名单：这些族的候选免 AI 二次验证。
+# - DET-*/SPELL/FILENAME/TOC/REF-INDEX/ANCHOR-FAIL/LEARN-PATCH：精确匹配/交叉核对。
+# - STRUCT-*（几何/结构计算）：AI 复核只有文本证据、看不到表格几何，
+#   复核必然误杀版式类真问题（P1 首跑实证：#13 表注/#23 表头跨页/#32 列宽出界全被砍）。
+# 注意：CYY-CN-PUNCT/FORMAT/UNIT 等"人工经验基线"正则族不在白名单内——它们是噪声主力，
+# 必须送 AI 二次验证（否则 ai_check_issues 恒空、calls=0，二次验证形同虚设）。
+_DETERMINISTIC_RULE_ID_PREFIXES = (
+    'DET-', 'CYY-CN-PAGE', 'DOC-PAGE-', 'STRUCT-',
+    'SPELL', 'FILENAME-', 'TOC-', 'REF-INDEX-', 'ANCHOR-FAIL-', 'LEARN-PATCH-',
+)
+
+
+# 注意：此函数仍被低价值过滤豁免面（2053/2082/2210/6222 行）复用，语义是
+# "确定性来源，不做低价值 AI 过滤"，保持一刀切豁免不动。
+# 二次验证路由请用下方 _needs_ai_second_verification。
 def _is_deterministic_review_rule(issue):
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     source = str(_issue_value(issue, 'source', '') or '').lower()
     if source in {'rule', 'term', 'spellcheck'}:
         return True
     return rule.startswith(('DOC-', 'ENG-CN-', 'CHECKLIST-', 'GRAMMAR-', 'HR', 'UNIT-', 'PUNCT-', 'SPELL'))
+
+
+def _needs_ai_second_verification(issue):
+    """True = 该候选需送 AI 二次验证；False = 确定性候选，豁免。
+
+    term/spellcheck 及白名单确定性族豁免；CYY-CN-PUNCT/FORMAT/UNIT 等
+    "人工经验基线"正则族是噪声主力，必须送 AI 复核。若沿用
+    _is_deterministic_review_rule 的一刀切豁免，ai_check_issues 恒空、
+    二次验证 calls=0、形同虚设（2026-11-19 根因报告实证）。
+    """
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    if source in {'term', 'spellcheck'}:
+        return False
+    if source != 'rule':
+        return True
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    return not rule.startswith(_DETERMINISTIC_RULE_ID_PREFIXES)
 
 
 def _ai_audit_timeout_seconds(content):
@@ -13829,6 +13862,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     except Exception as e:
                         print(f"[审核] 中文确定性格式规则执行失败: {e}")
 
+                    if document.file_type == 'pdf' and not snippet_review:
+                        try:
+                            from app.review_engine.pdf_table_continuity import check_pdf_table_continuity
+                            table_cont_issues = check_pdf_table_continuity(_get_document_upload_path(document))
+                            if table_cont_issues:
+                                print(f"[审核] PDF 表格连续性几何规则发现问题: {len(table_cont_issues)}个")
+                            rule_issues.extend(table_cont_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 表格连续性几何规则执行失败: {e}")
+
                 if not snippet_review:
                     try:
                         release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
@@ -13836,6 +13879,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         rule_issues.extend(release_checklist_issues)
                     except Exception as e:
                         print(f"[审核] 发布前自检 Checklist 执行失败: {e}")
+
+                if document_language in ("en", "both"):
+                    try:
+                        en_format_issues = check_en_format_consistency(content)
+                        print(f"[审核] 英文确定性格式规则发现问题: {len(en_format_issues)}个")
+                        rule_issues.extend(en_format_issues)
+                    except Exception as e:
+                        print(f"[审核] 英文确定性格式规则执行失败: {e}")
 
             if document.file_type != 'xlsx' and not snippet_review:
                 # ── 文件名审核 ──
@@ -13866,14 +13917,19 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         deterministic_issues = []
                         ai_check_issues = list(candidate_rule_issues)
                     else:
-                        deterministic_issues = [issue for issue in candidate_rule_issues if _is_deterministic_review_rule(issue)]
-                        ai_check_issues = [issue for issue in candidate_rule_issues if not _is_deterministic_review_rule(issue)]
+                        deterministic_issues = [issue for issue in candidate_rule_issues if not _needs_ai_second_verification(issue)]
+                        ai_check_issues = [issue for issue in candidate_rule_issues if _needs_ai_second_verification(issue)]
                     if not ai_check_issues and candidate_rule_issues:
-                        print(f"[审核] AI二次验证跳过: {len(deterministic_issues)} 条候选全为确定性规则（source=rule/term/spellcheck），未调用模型。"
+                        print(f"[审核] AI二次验证跳过: {len(deterministic_issues)} 条候选全为确定性规则（term/spellcheck/白名单族），未调用模型。"
                               f"如需 AI 验证这些候选，设 REVIEW_AI_VERIFY_DETERMINISTIC=1")
+                    # filter_rule_false_positives 内部按 20 条/批串行调模型，候选多时耗时随批数线性增长；
+                    # 固定 90s 会在大文档上必超时（T7 实证：566 候选 29 批，90s 截断回退原始结果）。
+                    fp_filter_timeout = float(os.getenv("REVIEW_FP_FILTER_TIMEOUT", "0") or 0)
+                    if fp_filter_timeout <= 0:
+                        fp_filter_timeout = float(min(900, max(90, math.ceil(len(ai_check_issues) / 20) * 25)))
                     filtered = _call_with_timeout(
                         ai_client.filter_rule_false_positives,
-                        90.0,
+                        fp_filter_timeout,
                         ai_check_issues,
                         document_language,
                         review_id,
@@ -13882,6 +13938,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     ) if ai_check_issues else []
                     candidate_rule_issues = deterministic_issues + filtered
                     print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}, 确定性规则保留={len(deterministic_issues)}")
+                    if ai_check_issues:
+                        kept_keys = {id(it) for it in filtered}
+                        dropped = [it for it in ai_check_issues if id(it) not in kept_keys]
+                        if dropped:
+                            print(f"[审核] AI二次验证丢弃 {len(dropped)} 条候选明细（供审计）:")
+                            for it in dropped[:200]:
+                                print(f"    [FP-FILTER] {str(_issue_value(it, 'rule', '') or '')[:40]} | "
+                                      f"{str(_issue_value(it, 'original_text', '') or '')[:60]}")
                     _log_review_ai_usage(review_id, "review.rule_false_positive_filter", "AI二次验证Token统计")
                 except concurrent.futures.TimeoutError:
                     print(f"[审核] AI 二次验证超时(90s), 使用原始规则结果({len(candidate_rule_issues)}个)")

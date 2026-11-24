@@ -2567,6 +2567,15 @@ class AIClient:
             print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
             _prompt_builder_fallback_logged = True
 
+        # few-shot 审校判例：真实人工批注校准问题报告颗粒度（失败静默跳过，不阻断审核）
+        fewshot_block = ""
+        try:
+            from app.review_engine.fewshot_corpus import build_fewshot_block
+
+            fewshot_block = build_fewshot_block(content, lang)
+        except Exception as e:
+            print(f"[ai_client] few-shot 判例加载失败，跳过注入: {e}")
+
         if is_english:
             context_block = f"\n\n{base_system_prompt}" if base_system_prompt.strip() else ""
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
@@ -2591,7 +2600,7 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
 - Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".
 - Accuracy: report wording that does not match the actual interface or behavior, and descriptions that resemble but do not name the real object. Use category "表述不准确".
-- Completeness: report operation steps missing a required follow-up action, and step results without a closing action. Use category "信息不完整".
+- Completeness: report a missing follow-up action or closing step ONLY when the excerpt itself proves the defect: the review basis/checklist explicitly requires that action, another statement inside the same excerpt contradicts or promises the missing content, or skipping the action leaves the instrument/sample/operating environment in an unsafe state. Do NOT report generic completeness suggestions such as "this step lacks a purpose/result/acceptance criteria/confirmation trigger compared with parallel steps" — a step that differs from its neighbors is not a defect by itself. Use category "信息不完整" and cite the explicit requirement as evidence.
 - Consistency: report the same object, action, term, or abbreviation described inconsistently across sections, including case inconsistency and inconsistent punctuation in parallel list items; cite both occurrences and give the unified form. Use category "一致性".
 - Tone and direction: report honorifics such as "please" added to operation steps, except text shown in the UI itself. Only suggest deleting or correcting text that exists; never suggest adding words the excerpt does not contain. Use category "语气".
 - Figure/table continuity: report a missing sentence-ending mark where a table or figure caption runs straight into the following body text. Use category "图表衔接".
@@ -2601,7 +2610,7 @@ Each semantic issue must quote the complete sentence from the excerpt as evidenc
 MANDATORY CONTENT CHECKS (report as serious/fatal when violated, with evidence):
 - Safety/grounding statements: report when a safety warning, protective-grounding instruction, or electrical-safety statement is truncated, contradicts another statement in the same excerpt, or misses a required protective-action clause (e.g. grounding requirements without wiring instructions). Category "安全合规".
 - Permission/access statements: report when a function is stated as restricted (e.g. "admin only", "available to administrator") but the excerpt provides no administrator configuration path, or the permission wording is ambiguous about who can perform the action. Category "法规合规" or "信息不完整".
-- UI status/transition descriptions: report when a UI state transition (pause/resume, start/stop, selection) omits the trigger action or the resulting state is unclear from the text alone. Category "操作步骤" or "信息不完整".
+- UI status/transition descriptions: report when the trigger action of a UI state transition (pause/resume, start/stop, selection) is truly absent from the entire excerpt AND the user cannot determine from the text how or when the transition happens. Do not report merely because a neighboring step states a purpose, result, or confirmation that the current one does not. Category "操作步骤" or "信息不完整".
 - Troubleshooting/fault content: report when a fault-troubleshooting step ends without a resolution or references a missing table/figure/step that is required for the user to continue. Category "信息不完整" or "编号引用".
 
 🚫 FORBIDDEN issue types (reporting any of these is an error):
@@ -2609,10 +2618,18 @@ MANDATORY CONTENT CHECKS (report as serious/fatal when violated, with evidence):
 - ❌ Issues where the original field is shorter than 2 meaningful characters
 - ❌ Pure formatting differences that are visually identical
 - ❌ Excerpt-boundary artifacts reported as completeness defects: missing sections, headings without body text, truncated sentences, table header cells whose rows fall outside the excerpt, table-of-contents lines, or "the document/excerpt is incomplete"
+- ❌ Generic completeness suggestions that compare a step with its neighbors ("compared with parallel steps, this step lacks X" / "omits confirmation trigger" / "lacks acceptance criteria") without citing an explicit requirement from the review basis, a contradiction inside the excerpt, or a safety consequence
 - ❌ Low-value English rewrite issues that do not affect meaning, compliance, or user operation: article choices (a/the), gerund vs infinitive style, singular/plural variants, word-order or phrasing preferences, British/American spelling variants where both forms are standard, and subject-verb agreement variations where the sentence remains clearly understandable. Report these only when the variation changes the meaning, breaks a complete sentence, or affects release/compliance.
 
 Quality issues such as punctuation habit, spacing, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported ONLY when they affect formatting compliance or operability, and as severity=suggestion. Do not report acceptable, unambiguous variants for padding.
 
+ADJUDICATION PROTOCOL (run before finalizing the severity of ANY issue):
+1. Four checks: (a) consistency claims must compare the SAME object — differences across different standard systems, different models, or different configuration items are NOT inconsistency; (b) search for fallback declarations such as "subject to the actual purchased instrument" or "the following shows the most complete configuration" — such statements greatly weaken any "misleading content" claim; (c) for suspected numeric conflicts, verify arithmetic self-consistency first — when the sum of module-level values (per-module power/dimensions) equals the system-level value, do NOT report a conflict, at most report missing standard/optional labels as severity=suggestion; (d) would the user actually fail to complete the task? If not, downgrade or drop.
+2. Accuracy of standard names, regulatory terms, and product model numbers must NEVER be judged from memory: assign a severity only when the authoritative text is verifiable; otherwise report the doubt with needs_human_review=true and never as a spelling/expression error. Example: GB/T 18268 is officially titled "电设备" while GB/T 42125 uses "电气设备" — different standard families, neither is a typo.
+3. Before claiming a component is leftover from another model, verify functional equivalence: search the literal name first, then search for functionally equivalent or correspondingly named parts and compare their technical parameters; report "naming inconsistency" if an equivalent part exists, and only claim leftover when none does.
+4. For drafts under review: placeholder dates like "YYYY 年 MM 月 xx 日" in revision history and revision highlights/annotations are normal submission markers — do not report "unfinalized placeholder" or "revision marks not cleared", and do not downgrade release-readiness because of them.
+5. The expected field must be backed by the excerpt or an explicit rule. When no evidence-backed correction exists, describe the doubt and set needs_human_review=true; never invent content absent from the excerpt (e.g. a power value or a missing step guessed from common sense).
+{fewshot_block}
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
 - Do not rewrite text only for readability, tone, or style. Report only objective violations from the checklist or common-error rules.
@@ -2667,7 +2684,8 @@ Output ONLY strict JSON:
       "basis": "review basis or checklist clause used for the judgment",
       "source": "ai",
       "status": "open",
-      "confidence": 50-100
+      "confidence": 50-100,
+      "needs_human_review": false
     }}
   ],
   "observations": [
@@ -2727,16 +2745,24 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 - ❌ original 字段长度小于 2 个有意义字符的问题
 - ❌ 纯格式差异但视觉呈现完全一致
 - ❌ 把机械切分产生的边界现象当作完整性缺陷：缺少章节、标题下无正文、句子被截断、表格只有表头、目录行被当成无正文标题、"文档/节选不完整"
+- ❌ 完整性类泛化建议：仅因"与并列步骤相比缺少目的/结果/验收标准/确认触发"而上报——某步骤与其相邻步骤不同本身不是缺陷。完整性问题仅在节选内能自证时报告：审核依据/checklist 明文要求该动作、节选内其他表述与之矛盾或承诺了缺失内容、或缺少该动作会导致仪器/样本/操作环境处于不安全状态，且必须写明该明文依据。
 - ❌ 不影响语义、合规或用户操作的低价值改写问题：只为了语言风格而调整的语序、句式、同义表达、语气助词增减（如"请""的/地/得"混用）、无歧义的标点习惯差异，以及原文表达可正常理解时的主谓/搭配微调。仅当改动会改变原意、破坏句子完整性或影响发布/合规时才可报告。
 
 必查内容类问题（违反时须按 serious/fatal 报告，并给出证据）：
 - 安全/接地声明：安全警告、保护接地要求、电气安全语句被截断，或与同一节选内其他语句互相矛盾，或缺少必要的保护动作说明（如只有接地要求而无布线操作）时报告，category=安全合规。
 - 权限/访问表述：功能被声明为受限（如"仅管理员""管理员账号可用"），但节选内没有给出管理员配置路径，或权限措辞无法明确谁可执行该操作时报告，category=法规合规或信息不完整。
-- UI 状态/切换描述：界面状态切换（暂停/继续、启动/停止、选中）缺少触发动作，或仅凭文本无法判断切换后的状态时报告，category=操作步骤或信息不完整。
+- UI 状态/切换描述：界面状态切换（暂停/继续、启动/停止、选中）的触发动作在整个节选中确实缺失，且仅凭文本用户无法判断如何触发或切换后处于什么状态时才报告；不得仅因相邻步骤写了目的/结果/确认而当前步骤未写就上报。category=操作步骤或信息不完整。
 - 故障排查内容：故障排查步骤没有给出解决动作就结束，或引用了用户继续操作所必需的表格/图/步骤但该对象不存在时报告，category=信息不完整或编号引用。
 
 标点习惯、空格、缩写展开、动名词形式和风格偏好等质量类问题，仅当影响排版规范或可操作性时才报告，severity=suggestion；不得为凑数而报告无歧义的可接受变体。
 
+裁定程序（每条问题定级前执行）：
+1. 四问自检：① 一致性指控的两个写法是否指向同一对象——不同标准体系、不同型号、不同配置项的写法差异不算"前后不统一"；② 是否存在兜底声明——"以实际购买的仪器为准""以下为最全配置模块"类声明会削弱误导性指控，定级前必须检索；③ 数值矛盾是否加和自洽——各分块参数之和与整机参数一致时不报矛盾，最多按 suggestion 报"分块未标注标配/选配"；④ 用户实际使用是否会失败。
+2. 标准名称、法规术语、产品型号的准确性不得凭常识判错：查得到原文才定级；查不到时照常输出但置 needs_human_review=true 并写明存疑点，严禁按错别字/表述错误定级。
+3. 判定"部件为其他机型残留"前必须验证功能等价性：先检索字面写法，再检索功能等价部件并比对参数；有等价部件改报"命名不统一"。
+4. 过程稿/送审稿：版本记录日期"YYYY 年 MM 月 xx 日"、改动处高亮与批注属送审常态，不报"未定稿占位符"与"修改痕迹未清除"。
+5. expected 必须有原文或规则依据；无法给出有依据的写法时，只描述问题并置 needs_human_review=true，禁止凭空建议补充原文没有的内容。
+{fewshot_block}
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
@@ -2790,7 +2816,8 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
       "basis": "判断依据或引用的规则条款",
       "source": "ai",
       "status": "open",
-      "confidence": 50-100
+      "confidence": 50-100,
+      "needs_human_review": false
     }}
   ],
   "observations": [
