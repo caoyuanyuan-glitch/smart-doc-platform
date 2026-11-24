@@ -714,3 +714,45 @@ def test_html_report_renders_needs_human_review_badge():
     assert "badge-manual" in html
     assert "需人工复核" in html
     assert html.count("需人工复核") == 1
+
+def test_deterministic_rule_punctuation_original_survives_noise_gate():
+    """纯标点 original：AI 噪声照杀，确定性规则（source=rule）不得吞。
+
+    T7 R01 goldset #33「浓缩处理：，以下」——DET-CN-PUNCT-CLUSTER 的
+    original_text='：，' 曾被 is_noise 纯标点分支误杀导致漏报。
+    """
+    from app.review_engine.pipeline import is_noise
+
+    rule_issue = {
+        "source": "rule",
+        "rule": "DET-CN-PUNCT-CLUSTER",
+        "severity": "general",
+        "confidence": 92,
+        "original_text": "：，",
+        "context": "对文库进行浓缩处理：，以下步骤中所用的磁珠需按量加入",
+        "suggestion": "建议删除冒号",
+        "description": "冒号后紧跟逗号，标点叠用。",
+        "category": "标点符号",
+    }
+
+    assert not is_noise(rule_issue)
+
+
+def test_cn_format_rules_pass_through_pipeline():
+    """DET-CN 五类规则 issue 均能活着通过 select_review_issues（min_score=45）。"""
+    from app.review_engine.cn_format_consistency import check_cn_format_consistency
+    from app.review_engine.pipeline import select_review_issues
+
+    text = (
+        "超过5 天以上未使用。"
+        + "储存在 2 ℃~8 ℃。" * 8 + "紧贴样例2℃出现。"
+        + "处理：，后续步骤。\n，回车残留标点。"
+        + "货号：940-001530-00。\n" * 8 + "货号：940-00317100"
+    )
+    issues = check_cn_format_consistency(text)
+    selected = select_review_issues(issues)
+    rules = {i["rule"] for i in selected}
+    assert rules == {
+        "DET-CN-UNITSPACE", "DET-CN-CATNO-FMT", "DET-CN-REDUNDANT",
+        "DET-CN-PUNCT-CLUSTER", "DET-CN-LINE-LEAD",
+    }

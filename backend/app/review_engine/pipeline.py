@@ -731,7 +731,15 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if rule == "CYY-CN-PLACEHOLDER-001" and re.fullmatch(r"X{1,4}(?::X{1,4}){1,2}", original, re.IGNORECASE):
         return True
-    if severity in {"general", "suggestion"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE) and len(original) <= 3:
+    # 纯标点碎片是 AI 解析噪声的典型形态；但确定性规则（source=rule/term，
+    # 如 DET-CN-PUNCT-CLUSTER「：，」、R003 重复标点）的标点命中是刻意上报，
+    # 不得按此条吞掉。
+    if (
+        source not in {"rule", "term"}
+        and severity in {"general", "suggestion"}
+        and re.fullmatch(r"[\W_]+", original or "", re.UNICODE)
+        and len(original) <= 3
+    ):
         return True
     if is_visual_layout_issue(data) and not is_whitelisted_layout_issue(data):
         return True
@@ -957,6 +965,10 @@ def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: 
             kept = downgrade_instead_of_drop(issue, reason)
             if kept is not None:
                 downgraded.append(kept)
+
+    # 修复：dedupe_shadowed 分支引用 drop_reasons 但此前从未初始化，
+    # 一旦出现遮蔽重复即抛 NameError 使整个审核任务失败。
+    drop_reasons: Counter = Counter()
 
     for raw_issue in issues or []:
         issue = normalize_issue(raw_issue)
