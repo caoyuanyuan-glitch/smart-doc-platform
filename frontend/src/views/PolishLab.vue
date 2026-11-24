@@ -603,40 +603,30 @@
                   <div class="cat-issue-tags" v-if="categoryLabel(selectedTextCatCandidate(item))">
                     <span class="cat-category-tag">{{ categoryLabel(selectedTextCatCandidate(item)) }}</span>
                   </div>
-                  <div class="issue-diff-card cat-issue-diff-card">
-                    <div class="issue-diff-row">
-                      <span class="issue-diff-label">原文</span>
-                      <div class="issue-diff-content issue-diff-original" v-html="renderCatOriginalDiffHtml(item.originalText, getTextCatDisplayText(item))"></div>
-                    </div>
-                    <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
-                      <div class="cat-hint-title">提示</div>
-                      <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                    </div>
-                    <div v-else class="issue-diff-row">
-                      <span class="issue-diff-label">候选</span>
-                      <div class="issue-diff-content issue-diff-suggested">
-                        <div v-html="renderCatSuggestedDiffHtml(item.originalText, getTextCatDisplayText(item))"></div>
-                        <div v-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
-                          <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                        </div>
-                      </div>
-                    </div>
+                  <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
+                    <div class="cat-hint-title">提示</div>
+                    <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
                   </div>
-                  <div v-if="item.candidates.length > 1" class="cat-candidate-select-shell">
-                    <div class="cat-candidate-select-overlay">{{ selectedTextCatCandidate(item)?.template_text || '' }}</div>
-                    <el-select v-model="item.selectedCandidateIndex" class="full-width cat-candidate-select" size="large" popper-class="cat-candidate-select-popper" placeholder="选择候选句式" @change="applyTextCatCandidate(item)">
-                      <el-option
-                        v-for="(candidate, candidateIndex) in item.candidates"
-                        :key="`${item.rowKey}-${candidateIndex}`"
-                        :label="candidate.template_text || ''"
-                        :value="candidateIndex"
-                      >
-                        <div class="cat-candidate-option">
-                          <div class="cat-candidate-text">{{ candidate.template_text }}</div>
-                        </div>
-                      </el-option>
-                    </el-select>
-                  </div>
+                  <template v-else>
+                    <div class="cat-candidate-select-shell">
+                      <div class="cat-candidate-select-overlay">{{ selectedTextCatCandidate(item)?.template_text || '' }}</div>
+                      <el-select v-model="item.selectedCandidateIndex" class="full-width cat-candidate-select" size="large" popper-class="cat-candidate-select-popper" placeholder="选择候选句式" @change="applyTextCatCandidate(item)">
+                        <el-option
+                          v-for="(candidate, candidateIndex) in item.candidates"
+                          :key="`${item.rowKey}-${candidateIndex}`"
+                          :label="candidate.template_text || ''"
+                          :value="candidateIndex"
+                        >
+                          <div class="cat-candidate-option">
+                            <div class="cat-candidate-text">{{ candidate.template_text }}</div>
+                          </div>
+                        </el-option>
+                      </el-select>
+                    </div>
+                    <div v-if="isDiagnoseCandidate(selectedTextCatCandidate(item)) && diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
+                      <div class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                    </div>
+                  </template>
                 </div>
               </div>
             </div>
@@ -1854,6 +1844,9 @@ function findListItemInOther(itemText, index, otherText) {
 
 const textCatPanelItems = computed(() => textCatItems.value.filter(item => {
   if (!Array.isArray(item?.candidates) || !item.candidates.length) {
+    return false
+  }
+  if (isTextCatItemAppliedInResult(item)) {
     return false
   }
   if (item.candidates.length >= 2) {
@@ -3629,8 +3622,31 @@ function getTextCatCandidateValue(candidate) {
   return String(candidate?.raw_template_text || candidate?.template_text || '').trim()
 }
 
-function getTextCatDisplayText(item) {
-  return getTextCatCandidateValue(selectedTextCatCandidate(item))
+function normalizeComparableText(text) {
+  return String(text || '').replace(/\s+/g, '')
+}
+
+function isTextCatItemAppliedInResult(item) {
+  const polished = normalizeComparableText(getDisplayedPolishedText(result.value, textCatItems.value))
+  const candidates = Array.isArray(item?.candidates) ? item.candidates : []
+  if (!polished || !candidates.length) {
+    return false
+  }
+  // 提示类诊断没有可应用候选，需要保留展示
+  if (candidates.some(candidate => isHintOnlyDiagnose(candidate, item.originalText))) {
+    return false
+  }
+  const originalText = normalizeComparableText(item.originalText)
+  return candidates.every(candidate => {
+    const candidateText = normalizeComparableText(getTextCatCandidateValue(candidate))
+    if (!candidateText) {
+      return true
+    }
+    if (originalText && candidateText === originalText) {
+      return true
+    }
+    return polished.includes(candidateText)
+  })
 }
 
 function mergeTextCatResponseItems(catItems, diagnoseItems) {
