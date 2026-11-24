@@ -2017,6 +2017,84 @@ class AIClient:
             "raw_text": self._clean_text(result, 500),
         }
 
+    def extract_page_text_from_image(self, image_bytes, page_number=None, provider=None, review_id=None, request_label="review.image_text_extract"):
+        """图内文字提取（OCR 发现通路）：把页面截图交给视觉模型，读出全部可见文字。
+
+        与 verify_review_issue_from_image（复核已有疑点）不同，本函数用于「发现」：
+        截图/流程图/界面图内的文字不在 PDF 文本层，规则与 AI 都看不到——园园
+        2026-11-24 裁定这类文字应可识别（Workpace 截图、流程图内"面:"等）。
+        提取结果由 review_engine/pdf_image_text.py 与文本层 diff 后拼入审核上下文。
+
+        无 key / provider 不可用时返回 status=unavailable，调用方优雅降级零成本。
+        """
+        providers = [str(provider)] if provider else [
+            p.strip().lower() for p in str(os.getenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen,visual") or "").split(",") if p.strip()
+        ] or ["kimi"]
+        last_reason = "no_provider"
+        for prov in providers:
+            client = self._visual_client_for(prov)
+            if client is None:
+                last_reason = f"{prov}_unavailable"
+                continue
+            model = self._visual_model_for(prov)
+            prompt = (
+                "你是 OCR 引擎。请读出这张技术文档页面截图中全部可见文字，"
+                "按从上到下、从左到右的阅读顺序逐行输出纯文本，每行一条。"
+                "包括正文、标题、表格单元格、截图/界面图/流程图/原理图内的文字、按钮和标签。"
+                "只输出文字本身，不要输出页码、序号、任何解释或 markdown 格式；"
+                "读不清的字用原样保留，不要猜完整词。"
+            )
+            user_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self.build_image_data_url(image_bytes, file_name=f"extract-page-{page_number or 0}.png")},
+                },
+            ]
+            try:
+                if prov == "kimi":
+                    response = client.with_options(timeout=60, max_retries=0).chat.completions.create(
+                        **self._build_kimi_request_kwargs(
+                            model=model,
+                            messages=[{"role": "user", "content": user_content}],
+                            max_tokens=2000,
+                            thinking="disabled",
+                        )
+                    )
+                else:
+                    response = client.chat.completions.create(
+                        **self._build_qwen_request_kwargs(
+                            model=model,
+                            messages=[{"role": "user", "content": user_content}],
+                            max_tokens=2000,
+                            temperature=0.1,
+                        )
+                    )
+                self._record_usage_event(
+                    prov,
+                    model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                )
+                text = response.choices[0].message.content or ""
+                print(
+                    f"[视觉] 图内文字提取成功: provider={prov} model={model} "
+                    f"page={int(page_number or 0) or '?'} 字符={len(text)}",
+                    flush=True,
+                )
+                return {"status": "ok", "provider": prov, "text": text}
+            except Exception as exc:
+                reason = self._clean_text(str(exc), 180)
+                last_reason = f"{prov}_error"
+                print(
+                    f"[视觉] 图内文字提取失败: provider={prov} model={model or '(未配置)'} "
+                    f"page={int(page_number or 0) or '?'} 原因={reason}",
+                    flush=True,
+                )
+                continue
+        return {"status": "unavailable", "reason": last_reason, "text": ""}
+
     def _analyze_image_batch_to_draft(self, batch_images, batch_start, total_images, user_prompt=""):
         image_range = f"第 {batch_start + 1}-{batch_start + len(batch_images)} 张，共 {total_images} 张"
         draft_instruction = f"""

@@ -13136,8 +13136,11 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     # Numeric punctuation inside decimals, versions, and enumerations is usually valid.
+    # 只看 match 紧邻 2 字符（T7RS R02 p113 实测：context 窗口 40 字符时
+    # 「登录界面:」因后方 40 字符内出现 IP "192.168" 被整条跳过——真漏报）。
     if rule_no == "R001":
-        if re.search(r"\d[\.,]\d", context):
+        near = content[max(0, start - 2):min(len(content), end + 2)]
+        if re.search(r"\d[\.,]\d", near):
             return True
 
     if rule_no == "R002":
@@ -13779,6 +13782,26 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             content = content[:content_limit]
             content_truncation["truncated"] = original_content_length > len(content)
             content_truncation["kept_chars"] = len(content)
+        # 图内文字提取通路（园园 2026-11-24 裁定：截图/流程图内文字应可识别）：
+        # 图片型页面 → VL 模型 OCR → 与文本层 diff → 图内独有文字追加到 content
+        # 尾部（带页码标记），规则层与 AI 层共用。无视觉 key 时零成本降级。
+        image_text_augment = ""
+        if document.file_type == 'pdf' and not snippet_review:
+            try:
+                from app.review_engine.pdf_image_text import augment_pdf_image_text
+                image_text_augment, _image_text_diag = augment_pdf_image_text(
+                    _get_document_upload_path(document), review_id=review_id
+                )
+                if image_text_augment:
+                    content = content + "\n\n" + image_text_augment
+                    print(
+                        f"[审核] 图内文字提取: 页={_image_text_diag.get('pages_extracted')} "
+                        f"独有行={_image_text_diag.get('image_only_lines')}，已追加到审核上下文"
+                    )
+                else:
+                    print(f"[审核] 图内文字提取未产出: status={_image_text_diag.get('status')}")
+            except Exception as e:
+                print(f"[审核] 图内文字提取通路执行失败: {e}")
         # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
         content_truncated_chars = max(0, original_content_length - len(content))
         if content_truncated_chars:

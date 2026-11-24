@@ -122,3 +122,30 @@ class TestCnTemplateListRule:
         from app.api import review_rules
         src = review_rules.SYSTEM_PROMPT_TEMPLATE
         assert "10b" in src and "无序列表" in src
+
+
+class TestR001ColonGuard:
+    """R001 防小数守卫收窄到紧邻 2 字符（T7RS p113「界面:」后方 40 字符内
+    有 IP "192.168" 被整条跳过的漏报修复）。"""
+
+    def _skip(self, content, pattern):
+        import re
+        from types import SimpleNamespace
+        from app.api.review import _should_skip_rule_match
+        rule = SimpleNamespace(rule_no="R001")
+        m = re.search(pattern, content)
+        assert m
+        return _should_skip_rule_match(rule, m, content, "cn", "pdf")
+
+    def test_zhims_colon_not_skipped(self):
+        content = (
+            "1. 打开Chrome 浏览器，输入下述IP 地址，按【Enter】键，"
+            "进入ZLIMS 登录界面:\n\n192.168.100.50"
+        )
+        assert self._skip(content, r"界面:") is False
+
+    def test_decimal_still_skipped(self):
+        assert self._skip("用量为 3.5 mL 时，请确认。其余说明文字若干。", r"(?<=3)\.(?=5)") is True
+
+    def test_ip_still_skipped(self):
+        assert self._skip("请输入 192.168.100.50 地址进入系统。", r"(?<=192)\.(?=168)") is True
