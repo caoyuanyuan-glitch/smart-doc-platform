@@ -4,6 +4,7 @@ import re
 import uuid
 import json
 import random
+import csv
 import base64
 import unicodedata
 import html
@@ -26,6 +27,7 @@ from app.models.qa_history import QaSession, QaMessage
 from app.schemas.qa_feedback import QaFeedbackCreate, QaFeedbackOut
 from app.api.auth import get_current_user, oauth2_scheme, require_admin
 from app.utils.knowledge_usage import MODULE_QA, record_knowledge_file_call
+from app.utils.file_utils import read_file_safe
 
 router = APIRouter()
 
@@ -93,7 +95,19 @@ def _get_user_id_from_token(token: str, db: Session):
     return None
 
 
-def _save_qa_history(db: Session, session_type: str, question: str, answer_data: dict, user_id: int, session_id: Optional[int] = None, sources: list = None, search_hit: int = 0, relevance_score: float = 0.0):
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _session_duration_ms(session) -> int:
+    total = 0
+    for message in (getattr(session, "messages", None) or []):
+        if getattr(message, "role", "") == "assistant":
+            total += int(getattr(message, "duration_ms", 0) or 0)
+    return total
+
+
+def _save_qa_history(db: Session, session_type: str, question: str, answer_data: dict, user_id: int, session_id: Optional[int] = None, sources: list = None, search_hit: int = 0, relevance_score: float = 0.0, duration_ms: int = 0):
     title = question[:80] + ("..." if len(question) > 80 else "")
     sess = None
     if session_id:
@@ -113,6 +127,7 @@ def _save_qa_history(db: Session, session_type: str, question: str, answer_data:
         sources=json.dumps(sources or answer_data.get("sources", []), ensure_ascii=False),
         search_hit=search_hit,
         relevance_score=relevance_score,
+        duration_ms=max(0, int(duration_ms or 0)),
     ))
     db.commit()
     return sess.id
@@ -177,21 +192,61 @@ def _char_ngrams(text: str, n: int = 2):
     return {pure[i:i + n] for i in range(len(pure) - n + 1)}
 
 
+def _split_content_by_lines(text: str, chunk_size: int = 500, overlap: int = 120):
+    lines = text.splitlines()
+    chunks = []
+    buf = []
+    size = 0
+    overlap = max(int(overlap or 0), 0)
+
+    def joined_size(rows):
+        if not rows:
+            return 0
+        return sum(len(row) for row in rows) + len(rows) - 1
+
+    for line in lines:
+        extra = len(line) + (1 if buf else 0)
+        if buf and size + extra > chunk_size:
+            chunk = "\n".join(buf).strip()
+            if chunk:
+                chunks.append(chunk)
+            keep = []
+            for prev in reversed(buf):
+                candidate = [prev, *keep]
+                if keep and joined_size(candidate) > overlap:
+                    break
+                keep = candidate
+            buf = keep
+            size = joined_size(buf)
+            extra = len(line) + (1 if buf else 0)
+        buf.append(line)
+        size += extra
+    chunk = "\n".join(buf).strip()
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
 def _split_content_to_chunks(content: str, chunk_size: int = 500, overlap: int = 120):
-    text = _normalize_text(content)
+    text = (content or "").strip()
     if not text:
         return []
-    if len(text) <= chunk_size:
-        return [text]
+    if "\n" in text:
+        return _split_content_by_lines(text, chunk_size, overlap)
+    normalized = _normalize_text(text)
+    if not normalized:
+        return []
+    if len(normalized) <= chunk_size:
+        return [normalized]
     chunks = []
     start = 0
     step = max(chunk_size - overlap, 120)
-    while start < len(text):
-        end = min(len(text), start + chunk_size)
-        chunk = text[start:end].strip()
+    while start < len(normalized):
+        end = min(len(normalized), start + chunk_size)
+        chunk = normalized[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        if end >= len(text):
+        if end >= len(normalized):
             break
         start += step
     return chunks
@@ -221,8 +276,8 @@ def _score_chunk(question: str, chunk: str, title: str = "", folder_path: str = 
 def _rank_document_chunks(question: str, documents: list, limit: int = 5):
     ranked = []
     for doc in documents:
-        content = _normalize_text(doc.get("content", ""))
-        if not content:
+        content = doc.get("content", "") or ""
+        if not _normalize_text(content):
             continue
         chunks = _split_content_to_chunks(content)
         folder_path = doc.get("folder_path", "") or ""
@@ -300,12 +355,85 @@ def _build_context_from_sources(ranked_sources: list, max_chars: int = 8000):
     return "\n\n".join(parts), normalized_sources
 
 
+def _extract_csv_content(file_path, file_type):
+    text = read_file_safe(file_path)
+    delimiter = "\t" if file_type == "tsv" else ","
+    sample = text[:4096]
+    if sample.strip():
+        try:
+            delimiter = csv.Sniffer().sniff(sample, delimiters=",\t;|").delimiter
+        except csv.Error:
+            pass
+    rows = []
+    for row in csv.reader(text.splitlines(), delimiter=delimiter):
+        rows.append(" | ".join((cell or "").strip() for cell in row))
+    return "\n".join(rows)
+
+
+def _split_md_table_row(line: str):
+    raw = (line or "").strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [cell.strip() for cell in raw.split("|")]
+
+
+def _is_md_table_row(line: str):
+    stripped = (line or "").strip()
+    return stripped.startswith("|") and stripped.count("|") >= 2
+
+
+_MD_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def _format_markdown_table_row(cells):
+    values = [(cell or "").strip() for cell in cells]
+    if not any(values):
+        return ""
+    left = values[0] if values else ""
+    standard = values[1] if len(values) > 1 else ""
+    extra = ""
+    if len(values) >= 4 and values[3] and values[3] != standard:
+        extra = values[3]
+    elif len(values) >= 3 and values[2] and values[2] not in {left, standard}:
+        extra = values[2]
+    if left and standard:
+        if extra:
+            return f"- {left} → {standard}（{extra}）"
+        return f"- {left} → {standard}"
+    return "- " + " | ".join([cell for cell in values if cell])
+
+
+def _format_markdown_tables(text: str):
+    lines = (text or "").splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _is_md_table_row(line) and i + 1 < len(lines) and _MD_TABLE_SEP.match(lines[i + 1].strip()):
+            i += 2
+            while i < len(lines) and _is_md_table_row(lines[i]) and not _MD_TABLE_SEP.match(lines[i].strip()):
+                formatted = _format_markdown_table_row(_split_md_table_row(lines[i]))
+                if formatted:
+                    out.append(formatted)
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def _extract_file_content(file_path, file_type):
     file_type = file_type.lower() if file_type else ""
     try:
         if file_type in ["txt", "md", "markdown", "json", "xml", "html", "css", "js", "py"]:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return f.read()
+            text = read_file_safe(file_path)
+            if file_type in ["md", "markdown"]:
+                return _format_markdown_tables(text)
+            return text
+        elif file_type in ["csv", "tsv"]:
+            return _extract_csv_content(file_path, file_type)
         elif file_type == "pdf":
             from PyPDF2 import PdfReader
             reader = PdfReader(file_path)
@@ -323,8 +451,7 @@ def _extract_file_content(file_path, file_type):
                     rows.append(" | ".join([str(c) if c is not None else "" for c in row]))
             return "\n".join(rows)
         else:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
+            return read_file_safe(file_path)
     except Exception as e:
         return f"[文件解析失败: {str(e)}]"
 
@@ -521,13 +648,123 @@ def _build_preview_html(file_path, file_type, text):
 
 
 def _is_valid_answer(text):
-    if not text or len(text.strip()) < 20:
+    stripped = (text or "").strip().strip('"')
+    if len(stripped) < 2:
         return False
     short_patterns = ["OK", "ok", "好的", "收到", "明白", "已处理"]
-    stripped = text.strip().strip('"')
     if stripped in short_patterns:
         return False
     return True
+
+
+def _unwrap_qa_answer(text: str):
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    from app.utils.ai_client import AIClient, _strip_code_fence
+    parsed = AIClient._extract_json(raw, None)
+    if isinstance(parsed, dict) and str(parsed.get("answer") or "").strip():
+        return str(parsed.get("answer") or "").strip()
+    return _strip_code_fence(raw)
+
+
+_FILE_EXT_RE = re.compile(r"\.(?:md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt|py)\b", re.I)
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+_BARE_PATH_RE = re.compile(
+    r"(?:\.\.?[/\\])?(?:[\w.+\-]+[/\\])+[\w.+\-]+\.(?:md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt)\b"
+    r"|[\w.+\-]+\.(?:md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt)\b",
+    re.I,
+)
+_LIST_PREFIX_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)")
+_CN_HEADING_RE = re.compile(r"^[一二三四五六七八九十百]+、\S")
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+_DANGLING_SOURCE_RE = re.compile(
+    r"(?:发布前规范文件位于|规范文件位于|文件位于|资料位于|文档位于|位于|路径为|路径是|来源为|来源是)\s*[:：]?\s*$"
+)
+
+
+def _is_source_locator(text: str) -> bool:
+    value = (text or "").strip().strip("`")
+    if not value:
+        return False
+    if _FILE_EXT_RE.search(value) or "monkeycode-tmp-files" in value:
+        return True
+    if " > " in value or re.search(r"[/\\]", value):
+        return True
+    return False
+
+
+def _strip_locators_from_text(text: str) -> str:
+    def drop_tick(match):
+        return "" if _is_source_locator(match.group(1)) else match.group(0)
+
+    cleaned = _BACKTICK_RE.sub(drop_tick, text or "")
+    cleaned = _BARE_PATH_RE.sub("", cleaned)
+    cleaned = re.sub(r"\.monkeycode-tmp-files/\S+", "", cleaned)
+    cleaned = re.sub(r"[（(]\s*[）)]", "", cleaned)
+    cleaned = re.sub(r"\s*[-–—|:：]\s*$", "", cleaned)
+    cleaned = re.sub(r"^[:：]\s*", "", cleaned)
+    cleaned = re.sub(r"(位于|路径|来源|文件)\s*[:：]?\s*$", "", cleaned)
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" \t-—:：")
+
+
+def _is_dangling_source_line(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return True
+    return bool(_DANGLING_SOURCE_RE.search(value))
+
+
+def _is_answer_heading(line: str) -> bool:
+    text = (line or "").strip()
+    if not text or _LIST_PREFIX_RE.match(text):
+        return False
+    return bool(_MD_HEADING_RE.match(text) or _CN_HEADING_RE.match(text))
+
+
+def _strip_source_files_from_answer(text: str) -> str:
+    lines = (text or "").splitlines()
+    kept = []
+    for line in lines:
+        prefix_match = _LIST_PREFIX_RE.match(line)
+        if prefix_match:
+            body = line[prefix_match.end():]
+            parts = re.split(r"[:：]", body, maxsplit=1)
+            if len(parts) == 2 and _is_source_locator(parts[0]) and parts[1].strip() and not _is_source_locator(parts[1]):
+                kept.append(prefix_match.group(1) + parts[1].strip())
+                continue
+            stripped = _strip_locators_from_text(body)
+            if stripped and not _is_source_locator(stripped) and not _is_dangling_source_line(stripped):
+                kept.append(prefix_match.group(1) + stripped)
+            continue
+        if _BACKTICK_RE.search(line) or _FILE_EXT_RE.search(line) or "monkeycode-tmp-files" in line:
+            stripped = _strip_locators_from_text(line)
+            if stripped and not _is_source_locator(stripped) and not _is_dangling_source_line(stripped):
+                kept.append(stripped)
+            continue
+        if _is_dangling_source_line(line):
+            continue
+        kept.append(line)
+
+    compact = []
+    index = 0
+    while index < len(kept):
+        if _is_answer_heading(kept[index]):
+            cursor = index + 1
+            while cursor < len(kept) and not kept[cursor].strip():
+                cursor += 1
+            if cursor >= len(kept) or _is_answer_heading(kept[cursor]):
+                index = cursor
+                continue
+        compact.append(kept[index])
+        index += 1
+
+    collapsed = []
+    for line in compact:
+        if not line.strip() and (not collapsed or not collapsed[-1].strip()):
+            continue
+        collapsed.append(line)
+    return "\n".join(collapsed).strip()
 
 
 def _call_ai_qa(question, context, source_titles: Optional[list] = None):
@@ -536,10 +773,11 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
         from app.utils.ai_client import ai_client
         enhanced_question = question if not source_hint else f"{question}\n\n优先参考资料：{source_hint}"
         result = ai_client.qa_answer(enhanced_question, context, request_label="qa.answer")
-        if result and result.get("answer") and _is_valid_answer(result["answer"]) and result["answer"] != "文档中未找到相关信息":
+        answer = _strip_source_files_from_answer(_unwrap_qa_answer((result or {}).get("answer", "")))
+        if answer and _is_valid_answer(answer) and answer != "文档中未找到相关信息":
             return {
-                "answer": result.get("answer", ""),
-                "source": result.get("source", source_hint)
+                "answer": answer,
+                "source": (result or {}).get("source", source_hint) or source_hint
             }
     except Exception:
         pass
@@ -549,7 +787,7 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
         prompt = f"""基于以下文档片段回答问题：
 
 文档片段：
-{context[:8000]}
+{context[:12000]}
 
 问题：{question}
 
@@ -558,20 +796,25 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
 请按照以下要求回答：
 1. 回答必须基于提供的文档片段，禁止编造信息
 2. 信息不足时明确说明"文档中未找到相关信息"
-3. 回答末尾附上最相关的来源名称或片段编号
+ 3. 直接输出给用户看的正文，不要输出 JSON，不要用代码块包裹，不要列出文件名、文件路径或来源清单
 4. 严格使用文档中的原始术语，不得自行改写成近义词（如文档写"主机"则必须用"主机"，不能写成"主持人"、"电脑"等）
-5. 保持文档中的产品名、型号、参数、单位等专有信息完全不变"""
+ 5. 保持文档中的产品名、型号、参数、单位等专有信息完全不变
+  6. 术语对照或表格有多条匹配时，用 Markdown 无序列表列出全部条目，例如 `- 接头 → 适配器（Adapter）`；只有一条时直接给出结论
+ 7. 操作步骤必须用有序列表 `1. 2. 3.` 完整展开；禁止用「根据步骤1-6」代替具体操作"""
         messages = [{"role": "user", "content": prompt}]
-        proxy_result = ai_client.chat(messages, max_tokens=2048, request_label="qa.answer.fallback")
-        if proxy_result and _is_valid_answer(proxy_result):
-            return {"answer": proxy_result, "source": source_hint}
+        proxy_result = ai_client.chat(messages, max_tokens=4096, request_label="qa.answer.fallback")
+        fallback_answer = _strip_source_files_from_answer(_unwrap_qa_answer(proxy_result or ""))
+        if fallback_answer and _is_valid_answer(fallback_answer):
+            return {"answer": fallback_answer, "source": source_hint}
     except Exception:
         pass
 
     snippet_preview = context[:1200].strip()
     if snippet_preview:
         return {
-            "answer": f"AI 引擎暂时不可用，以下是文档中与您问题相关的原始内容片段，供参考：\n\n{snippet_preview}",
+            "answer": _strip_source_files_from_answer(
+                f"AI 引擎暂时不可用，以下是文档中与您问题相关的原始内容片段，供参考：\n\n{snippet_preview}"
+            ),
             "source": source_hint
         }
 
@@ -741,6 +984,7 @@ async def ask_general_question(
     db: Session = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ):
+    started = time.perf_counter()
     question = (input_data.question or "").strip()
     knowledge_ids = input_data.knowledge_ids or []
     user_id = _get_user_id_from_token(token, db)
@@ -777,7 +1021,10 @@ async def ask_general_question(
 
     session_id = None
     if user_id:
-        session_id = _save_qa_history(db, "general", question, result, user_id, input_data.session_id, sources, search_hit, relevance_score)
+        session_id = _save_qa_history(
+            db, "general", question, result, user_id, input_data.session_id,
+            sources, search_hit, relevance_score, duration_ms=_elapsed_ms(started),
+        )
     response_data["session_id"] = session_id
 
     return response_data
@@ -838,6 +1085,7 @@ async def ask_document_question(
     db: Session = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ):
+    started = time.perf_counter()
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR)
 
@@ -889,7 +1137,10 @@ async def ask_document_question(
 
     new_session_id = None
     if user_id:
-        new_session_id = _save_qa_history(db, "doc", question, result, user_id, session_id, sources, search_hit, relevance_score)
+        new_session_id = _save_qa_history(
+            db, "doc", question, result, user_id, session_id, sources, search_hit, relevance_score,
+            duration_ms=_elapsed_ms(started),
+        )
 
     return {
         "question": question,
@@ -1067,8 +1318,6 @@ async def get_qa_sessions(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
     user_id = current_user.id
 
     q = db.query(QaSession).filter(QaSession.user_id == user_id)
@@ -1087,6 +1336,7 @@ async def get_qa_sessions(
                 "created_at": _to_beijing_iso(s.created_at),
                 "updated_at": _to_beijing_iso(s.updated_at),
                 "message_count": len(s.messages) if s.messages else 0,
+                "duration_ms": _session_duration_ms(s),
             }
             for s in sessions
         ]
@@ -1099,8 +1349,6 @@ async def get_qa_session_detail(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
     user_id = current_user.id
 
     sess = db.query(QaSession).filter(QaSession.id == session_id, QaSession.user_id == user_id).first()
@@ -1121,6 +1369,7 @@ async def get_qa_session_detail(
             "sources": sources,
             "rating": m.rating,
             "created_at": _to_beijing_iso(m.created_at),
+            "duration_ms": int(getattr(m, "duration_ms", 0) or 0),
         })
 
     return {
@@ -1130,6 +1379,7 @@ async def get_qa_session_detail(
             "title": sess.title,
             "created_at": _to_beijing_iso(sess.created_at),
             "updated_at": _to_beijing_iso(sess.updated_at),
+            "duration_ms": _session_duration_ms(sess),
         },
         "messages": messages,
     }
@@ -1141,8 +1391,6 @@ async def delete_qa_session(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
     user_id = current_user.id
 
     sess = db.query(QaSession).filter(QaSession.id == session_id, QaSession.user_id == user_id).first()
@@ -1195,7 +1443,7 @@ async def get_qa_dashboard(
     session_type: str = Query(None, description="筛选场域"),
     rating: int = Query(None, description="筛选评分"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
+    page_size: int = Query(10, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
@@ -1414,7 +1662,7 @@ async def get_qa_dashboard(
         ai_replies = {}
         if session_ids:
             replies = db.query(
-                QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at, QaMessage.search_hit
+                QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at, QaMessage.search_hit, QaMessage.duration_ms
             ).filter(
                 QaMessage.role == "assistant",
                 QaMessage.session_id.in_(session_ids),
@@ -1452,6 +1700,7 @@ async def get_qa_dashboard(
                 "success": success,
                 "search_hit": search_hit_val,
                 "created_at": _to_beijing_iso(r.created_at),
+                "duration_ms": int(getattr(reply, "duration_ms", 0) or 0) if reply else 0,
             })
 
     return {

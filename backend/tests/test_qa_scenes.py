@@ -20,16 +20,18 @@ from app.utils.qa_scenes import QA_SCENES, build_scene_inventory
 class QaScenesCatalogTest(unittest.TestCase):
     def test_scene_keys_and_paths_match_qa_cards(self):
         mapping = {scene["key"]: [tuple(path) for path in scene["paths"]] for scene in QA_SCENES}
-        self.assertEqual(mapping["style"], [("写作规范", "写作风格指南")])
-        self.assertEqual(mapping["sentence"], [("写作规范", "句式清单")])
-        self.assertEqual(mapping["review"], [
+        self.assertEqual(mapping["style"], [
+            ("写作规范", "写作风格指南"),
             ("写作规范", "常见错误清单"),
             ("写作规范", "技术文档审核规则库"),
             ("写作规范", "说明书自检checklist"),
             ("写作规范", "审核依据汇总"),
         ])
+        self.assertEqual(mapping["phrase"], [
+            ("写作规范", "句式清单"),
+            ("资源库", "记忆库"),
+        ])
         self.assertEqual(mapping["term"], [("资源库", "术语库")])
-        self.assertEqual(mapping["tm"], [("资源库", "记忆库")])
         self.assertEqual(mapping["files"], [("资源库", "文件资料")])
 
 
@@ -85,8 +87,9 @@ class QaScenesInventoryTest(unittest.TestCase):
             self.assertNotIn("agent-secret.md", names)
             nested_row = next(row for row in style_scene["files"] if row["id"] == nested_file.id)
             self.assertEqual(nested_row["folder_path"], "写作规范/写作风格指南/中文")
-            self.assertEqual(scenes["sentence"]["file_count"], 0)
-            self.assertIn("写作规范/句式清单", scenes["sentence"]["missing_paths"])
+            self.assertEqual(scenes["phrase"]["file_count"], 0)
+            self.assertIn("写作规范/句式清单", scenes["phrase"]["missing_paths"])
+            self.assertIn("资源库/记忆库", scenes["phrase"]["missing_paths"])
         finally:
             db.close()
 
@@ -94,9 +97,9 @@ class QaScenesInventoryTest(unittest.TestCase):
         db = self.SessionLocal()
         try:
             scenes = build_scene_inventory(db)
-            self.assertEqual(len(scenes), 6)
+            self.assertEqual(len(scenes), 4)
             self.assertTrue(all(item["file_count"] == 0 for item in scenes))
-            self.assertEqual(scenes[0]["missing_paths"], ["写作规范/写作风格指南"])
+            self.assertEqual(scenes[0]["missing_paths"][0], "写作规范/写作风格指南")
         finally:
             db.close()
 

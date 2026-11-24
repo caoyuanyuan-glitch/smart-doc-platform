@@ -3,14 +3,22 @@ import unittest
 from app.utils.official_manual import (
     dedup_latest_by_fcode,
     extract_search_keyword,
+    extract_search_keywords,
     filter_manuals_by_keyword,
+    filter_manuals_by_lang,
     keyword_variants,
     needs_user_choice,
+    needs_user_choice_for_keywords,
+    normalize_official_item,
+    normalize_site,
+    official_site,
+    OfficialSearchError,
     pick_from_candidates,
     rank_manuals,
     score_manual,
     search_official_manuals,
     select_manuals,
+    select_manuals_for_keywords,
 )
 
 
@@ -158,6 +166,167 @@ class OfficialManualUtilTest(unittest.TestCase):
             {"title": "MGAP Hardware 产品说明书_中文", "artno": "111-000000-00", "fcode": "H-3"},
         ]
         self.assertTrue(needs_user_choice(items, "MGAP"))
+
+    def test_extract_multiple_products(self):
+        self.assertEqual(
+            extract_search_keywords("开机流程", "T1+, T7"),
+            ["T1+", "T7"],
+        )
+        self.assertEqual(
+            extract_search_keywords("开机流程", "T1+ T7"),
+            ["T1+", "T7"],
+        )
+
+    def test_select_one_manual_per_keyword(self):
+        ranked = [
+            {"id": 1, "fcode": "A", "title": "T1+ 系统操作指南", "artno": "940-1", "_score": 10},
+            {"id": 2, "fcode": "B", "title": "T7 系统操作指南", "artno": "940-2", "_score": 9},
+        ]
+        selected = select_manuals_for_keywords(ranked, "开机流程", ["T1+", "T7"])
+        self.assertEqual({item["id"] for item in selected}, {1, 2})
+
+    def test_multi_keyword_skips_choice_when_each_unique(self):
+        items = [
+            {"title": "T1+ 系统操作指南", "artno": "940-1", "fcode": "H-1"},
+            {"title": "T7 系统操作指南", "artno": "940-2", "fcode": "H-2"},
+        ]
+        self.assertFalse(needs_user_choice_for_keywords(items, ["T1+", "T7"]))
+
+    def test_multi_keyword_skips_choice_when_each_has_variants(self):
+        items = [
+            {"title": "T7+ 系统操作指南", "artno": "1", "fcode": "H-1"},
+            {"title": "T7+ 快速操作指南", "artno": "2", "fcode": "H-2"},
+            {"title": "T1+ 系统操作指南", "artno": "3", "fcode": "H-3"},
+            {"title": "G99 系统操作指南", "artno": "4", "fcode": "H-4"},
+        ]
+        self.assertFalse(needs_user_choice_for_keywords(items, ["T7+", "T1+", "G99"]))
+
+    def test_normalize_site(self):
+        self.assertEqual(normalize_site("en"), "en")
+        self.assertEqual(normalize_site("english"), "en")
+        self.assertEqual(normalize_site("zh"), "zh")
+        self.assertEqual(normalize_site(""), "zh")
+
+    def test_english_site_points_to_global(self):
+        cfg = official_site("en")
+        self.assertEqual(cfg["base"], "https://global-mgitech.com")
+        self.assertEqual(cfg["library_url"], "https://global-mgitech.com/resources/manual-library/")
+        self.assertIn("/wp-json/cua/v1/search", cfg["search_url"])
+        zh = official_site("zh")
+        self.assertEqual(zh["library_url"], "https://mgi-tech.com/manual")
+        self.assertIn("/index/index/manualSeaList", zh["search_url"])
+
+    def test_normalize_english_item(self):
+        row = normalize_official_item({
+            "id": 71980,
+            "title": "legacy",
+            "file_url": "https://global-mgitech.com/wp-content/uploads/Documents/t7.pdf",
+            "cua_title": "DNBSEQ-T7+RS Genetic Sequencer System Guide_English_RUO_WH",
+            "cua_fcode": "H-020-001143-00",
+            "cua_docuver": "6.0",
+            "cua_effdate": "2026-09-30",
+            "cua_softversion": "V0.2.0.1131",
+            "cua_pline": "Instrument equipment",
+        }, "en")
+        self.assertIn("System Guide", row["title"])
+        self.assertEqual(row["fcode"], "H-020-001143-00")
+        self.assertTrue(row["files"].startswith("https://global-mgitech.com/"))
+        self.assertEqual(row["downloadurl"], row["files"])
+
+    def test_rank_prefers_english_when_lang_en(self):
+        items = [
+            {
+                "id": 1,
+                "fcode": "H-1",
+                "title": "DNBSEQ-T1+ User Manual_English_RUO",
+                "updatetime": 100,
+            },
+            {
+                "id": 2,
+                "fcode": "H-2",
+                "title": "H-020 DNBSEQ-T1+RS 基因测序仪系统操作指南_中文_RUO",
+                "updatetime": 200,
+            },
+        ]
+        ranked = rank_manuals(items, "T1+ 开机流程是什么", "T1+", lang="en")
+        self.assertIn("English", ranked[0]["title"])
+
+    def test_filter_drops_opposite_language(self):
+        items = [
+            {"title": "DNBSEQ-T1+ User Manual_English_RUO", "id": 1},
+            {"title": "H-020 DNBSEQ-T1+RS 基因测序仪系统操作指南_中文_RUO", "id": 2},
+        ]
+        en_only = filter_manuals_by_lang(items, "en")
+        zh_only = filter_manuals_by_lang(items, "zh")
+        self.assertEqual([i["id"] for i in en_only], [1])
+        self.assertEqual([i["id"] for i in zh_only], [2])
+
+    def test_english_same_product_does_not_need_choice(self):
+        items = [
+            {
+                "id": 1,
+                "fcode": "H-020-001078-00",
+                "title": "H-020-001078-00 DNBSEQ-T1+RS Genetic Sequencer Quick Start Guide_English_RUO_SZ",
+            },
+            {
+                "id": 2,
+                "fcode": "H-020-001104-00",
+                "title": "H-020-001104-00 DNBSEQ-T1+RS Genetic Sequencer System Guide_English_RUO_SZ",
+            },
+        ]
+        ranked = rank_manuals(items, "T1+ power on checks", "T1+", lang="en")
+        self.assertFalse(needs_user_choice(ranked, "T1+"))
+        self.assertIn("System Guide", select_manuals(ranked, "T1+ power on checks")[0]["title"])
+
+    def test_search_english_site_uses_wp_endpoint(self):
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "status": 1,
+                    "items": [{
+                        "id": 71980,
+                        "cua_title": "DNBSEQ-T7+RS Genetic Sequencer System Guide_English_RUO_WH",
+                        "file_url": "https://global-mgitech.com/wp-content/uploads/Documents/t7.pdf",
+                        "cua_fcode": "H-020-001143-00",
+                        "cua_docuver": "6.0",
+                        "cua_effdate": "2026-09-30",
+                    }],
+                }
+
+        class FakeClient:
+            def __init__(self):
+                self.seen = []
+
+            def get(self, url, params=None, headers=None):
+                self.seen.append((url, dict(params or {})))
+                return FakeResp()
+
+            def post(self, *args, **kwargs):
+                raise AssertionError("english site should GET")
+
+        client = FakeClient()
+        rows = search_official_manuals("T7+", client=client, site="en")
+        self.assertTrue(client.seen)
+        self.assertIn("/wp-json/cua/v1/search", client.seen[0][0])
+        self.assertEqual(client.seen[0][1].get("q"), "T7+")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("System Guide", rows[0]["title"])
+        self.assertTrue(str(rows[0]["files"]).startswith("https://"))
+
+    def test_search_raises_when_library_unreachable(self):
+        class FakeClient:
+            def get(self, *args, **kwargs):
+                raise ConnectionError("tls timeout")
+
+            def post(self, *args, **kwargs):
+                raise AssertionError("english site should GET")
+
+        with self.assertRaises(OfficialSearchError) as ctx:
+            search_official_manuals("T7+", client=FakeClient(), site="en")
+        self.assertEqual(ctx.exception.library_url, "https://global-mgitech.com/resources/manual-library/")
 
 
 if __name__ == "__main__":

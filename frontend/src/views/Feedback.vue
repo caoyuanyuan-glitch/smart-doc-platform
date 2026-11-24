@@ -2,7 +2,7 @@
   <div class="feedback-page">
     <div class="page-header">
       <div class="header-left">
-        <h2 class="page-title">反馈管理</h2>
+        <h2 class="page-title">问题反馈</h2>
         <span class="page-subtitle">共 {{ items.length }} 条反馈，{{ unresolvedCount }} 条待处理</span>
       </div>
       <div class="header-actions">

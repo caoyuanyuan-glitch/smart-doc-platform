@@ -29,5 +29,6 @@ class QaMessage(Base):
     search_hit = Column(Integer, default=0)
     relevance_score = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow)
+    duration_ms = Column(Integer, default=0)
 
     session = relationship("QaSession", back_populates="messages")

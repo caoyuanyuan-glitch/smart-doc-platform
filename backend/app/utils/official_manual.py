@@ -1,18 +1,88 @@
 import os
 import re
+import logging
+import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import httpx
+import requests
+from requests.adapters import HTTPAdapter
 
 OFFICIAL_BASE = "https://www.mgi-tech.com"
 SEARCH_URL = f"{OFFICIAL_BASE}/index/index/manualSeaList"
+ZH_LIBRARY_URL = "https://mgi-tech.com/manual"
 OFFICIAL_HEADERS = {
     "User-Agent": "Mozilla/5.0 SmartDocManualQA",
     "Origin": OFFICIAL_BASE,
-    "Referer": f"{OFFICIAL_BASE}/manual",
+    "Referer": ZH_LIBRARY_URL,
     "Content-Type": "application/json",
 }
+EN_OFFICIAL_BASE = "https://global-mgitech.com"
+EN_LIBRARY_URL = f"{EN_OFFICIAL_BASE}/resources/manual-library/"
+EN_SEARCH_URL = f"{EN_OFFICIAL_BASE}/wp-json/cua/v1/search"
+EN_OFFICIAL_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": EN_LIBRARY_URL,
+    "Accept": "application/json",
+}
+EN_DOWNLOAD_HEADERS = {
+    "User-Agent": EN_OFFICIAL_HEADERS["User-Agent"],
+    "Referer": EN_LIBRARY_URL,
+    "Accept": "application/pdf,application/octet-stream,*/*",
+}
 MAX_PDF_BYTES = 80 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
+
+_EN_SESSION = None
+
+
+def _english_session():
+    global _EN_SESSION
+    if _EN_SESSION is None:
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": EN_OFFICIAL_HEADERS["User-Agent"],
+        })
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _EN_SESSION = sess
+    return _EN_SESSION
+
+
+def _reset_english_session():
+    global _EN_SESSION
+    sess = _EN_SESSION
+    _EN_SESSION = None
+    if sess is not None:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+class OfficialSearchError(Exception):
+    def __init__(self, site: str, library_url: str, message: str = ""):
+        self.site = site
+        self.library_url = library_url
+        super().__init__(message or f"cannot open {library_url}")
+
+
+def _requests_call(method: str, url: str, *, retries: int = 3, timeout: float = 30.0, stream: bool = False, **kwargs):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = _english_session().request(method, url, timeout=timeout, stream=stream, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except Exception as exc:
+            last_err = exc
+            _reset_english_session()
+            logger.warning("official %s %s attempt %s failed: %s", method, url, attempt + 1, exc)
+            time.sleep(0.5 * (attempt + 1))
+    raise last_err
 
 CATALOG_RE = re.compile(r"\b\d{3}-\d{6}-\d{2}\b")
 FCODE_RE = re.compile(r"\bH-\d{3}-\d{6}-\d{2}\b", re.I)
@@ -31,6 +101,72 @@ MODEL_RE = re.compile(
     re.I,
 )
 FLEX_MODEL_RE = re.compile(r"\b[A-Za-z]{2,}(?:[\s\-_]*\d+)[A-Za-z0-9+\-]*")
+
+
+def normalize_site(site: str) -> str:
+    s = (site or "").strip().lower()
+    if s in {"en", "english", "global", "en-us", "en_us"}:
+        return "en"
+    return "zh"
+
+
+def official_site(site: str = "zh") -> dict:
+    if normalize_site(site) == "en":
+        return {
+            "site": "en",
+            "base": EN_OFFICIAL_BASE,
+            "library_url": EN_LIBRARY_URL,
+            "search_url": EN_SEARCH_URL,
+            "headers": EN_OFFICIAL_HEADERS,
+            "kind": "en_wp",
+        }
+    return {
+        "site": "zh",
+        "base": OFFICIAL_BASE,
+        "library_url": ZH_LIBRARY_URL,
+        "search_url": SEARCH_URL,
+        "headers": OFFICIAL_HEADERS,
+        "kind": "cn_api",
+    }
+
+
+def _effdate_ts(value) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()[:10]
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return int(datetime.strptime(text, fmt).timestamp())
+        except ValueError:
+            continue
+    return 0
+
+
+def normalize_official_item(item: dict, site: str = "zh") -> dict:
+    row = dict(item or {})
+    if normalize_site(site) != "en":
+        return row
+    title = row.get("cua_title") or row.get("title") or ""
+    fcode = row.get("cua_fcode") or row.get("fcode") or ""
+    file_url = row.get("file_url") or row.get("url") or row.get("files") or ""
+    eff = row.get("cua_effdate") or row.get("create_time") or ""
+    row.update({
+        "title": title,
+        "fcode": fcode,
+        "docuversion": row.get("cua_docuver") or row.get("docuversion") or "",
+        "softversion": row.get("cua_softversion") or row.get("softversion") or "",
+        "create_time": eff,
+        "pline": row.get("cua_pline") or row.get("pline") or "",
+        "artno": row.get("artno") or "",
+        "files": file_url,
+        "downloadurl": file_url,
+        "updatetime": row.get("updatetime") or _effdate_ts(eff),
+    })
+    return row
 
 
 def compact_key(text: str) -> str:
@@ -86,7 +222,7 @@ def detect_question_lang(text: str) -> str:
 
 def title_lang(title: str) -> str:
     t = title or ""
-    if "_English_" in t or " User Manual" in t or t.endswith("_English"):
+    if "_English_" in t or " User Manual" in t or t.endswith("_English") or "System Guide" in t:
         return "en"
     if "_中文_" in t or "中文" in t:
         return "zh"
@@ -116,6 +252,29 @@ def extract_search_keyword(question: str, product: str = "") -> str:
     return q[:40]
 
 
+def extract_search_keywords(question: str, product: str = "") -> List[str]:
+    product = (product or "").strip()
+    if product:
+        parts = [p.strip() for p in re.split(r"[,，、;/|]+", product) if p.strip()]
+        if len(parts) == 1:
+            maybe = [p.strip() for p in re.split(r"\s+", parts[0]) if p.strip()]
+            if len(maybe) >= 2 and all(re.search(r"[A-Za-z0-9]", p) and not re.search(r"[\u4e00-\u9fff]", p) for p in maybe):
+                parts = maybe
+        return parts or [product]
+    models = [m.strip() for m in MODEL_RE.findall(question or "") if m.strip()]
+    uniq: List[str] = []
+    seen = set()
+    for model in models:
+        key = compact_key(model)
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(model)
+    if len(uniq) >= 2:
+        return uniq
+    single = extract_search_keyword(question, "")
+    return [single] if single else []
+
+
 def _is_quick_guide(title: str) -> bool:
     t = title or ""
     return "快速" in t or "Quick" in t
@@ -123,7 +282,7 @@ def _is_quick_guide(title: str) -> bool:
 
 def _is_full_manual(title: str) -> bool:
     t = title or ""
-    return any(token in t for token in ("系统操作指南", "User Manual", "产品说明书", "使用说明书"))
+    return any(token in t for token in ("系统操作指南", "User Manual", "产品说明书", "使用说明书", "System Guide"))
 
 
 def _wants_quick(question: str) -> bool:
@@ -183,8 +342,8 @@ def dedup_latest_by_fcode(items: List[dict]) -> List[dict]:
     return list(best.values()) + leftovers
 
 
-def rank_manuals(items: List[dict], question: str, keyword: str) -> List[dict]:
-    lang = detect_question_lang(question)
+def rank_manuals(items: List[dict], question: str, keyword: str, lang: Optional[str] = None) -> List[dict]:
+    lang = lang or detect_question_lang(question)
     ranked = []
     for item in dedup_latest_by_fcode(items):
         row = dict(item)
@@ -225,6 +384,69 @@ def filter_manuals_by_keyword(items: List[dict], keyword: str) -> List[dict]:
     return [item for item in items if matches_keyword(item, keyword)]
 
 
+def filter_manuals_by_keywords(items: List[dict], keywords: List[str]) -> List[dict]:
+    keywords = [k.strip() for k in (keywords or []) if (k or "").strip()]
+    if not keywords:
+        return list(items)
+    if not any(should_strict_filter(kw) for kw in keywords):
+        return list(items)
+    return [item for item in items if any(matches_keyword(item, kw) for kw in keywords)]
+
+
+def filter_manuals_by_lang(items: List[dict], lang: str) -> List[dict]:
+    want = normalize_site(lang)
+    kept = []
+    for item in items:
+        tl = title_lang(item.get("title") or "")
+        if tl == want or tl == "unknown":
+            kept.append(item)
+    return kept
+
+
+def rank_manuals_for_keywords(
+    items: List[dict],
+    question: str,
+    keywords: List[str],
+    lang: Optional[str] = None,
+) -> List[dict]:
+    keywords = [k.strip() for k in (keywords or []) if (k or "").strip()]
+    if not keywords:
+        return rank_manuals(items, question, "", lang=lang)
+    best: Dict[object, dict] = {}
+    for kw in keywords:
+        for row in rank_manuals(items, question, kw, lang=lang):
+            oid = row.get("id") or row.get("official_id")
+            prev = best.get(oid)
+            if prev is None or float(row.get("_score") or 0) > float(prev.get("_score") or 0):
+                best[oid] = row
+    ranked = list(best.values())
+    ranked.sort(key=lambda x: x.get("_score") or 0, reverse=True)
+    return ranked
+
+
+def select_manuals_for_keywords(
+    ranked: List[dict],
+    question: str,
+    keywords: List[str],
+    max_per_keyword: int = 1,
+) -> List[dict]:
+    keywords = [k.strip() for k in (keywords or []) if (k or "").strip()]
+    if len(keywords) <= 1:
+        return select_manuals(ranked, question, max_count=1)
+    selected = []
+    seen = set()
+    for kw in keywords:
+        matched = [item for item in ranked if matches_keyword(item, kw)]
+        picked = select_manuals(matched or ranked, question, max_count=max_per_keyword)
+        for item in picked:
+            oid = item.get("id") or item.get("official_id")
+            if oid in seen:
+                continue
+            seen.add(oid)
+            selected.append(item)
+    return selected
+
+
 def family_key(item: dict, keyword: str = "") -> str:
     artnos = re.split(r"[、,;/]+", item.get("artno") or "")
     arts = [compact_key(part) for part in artnos if compact_key(part)]
@@ -247,10 +469,23 @@ def needs_user_choice(items: List[dict], keyword: str = "") -> bool:
     return len({family_key(item, keyword) for item in items}) > 1
 
 
+def needs_user_choice_for_keywords(items: List[dict], keywords: List[str]) -> bool:
+    keywords = [k.strip() for k in (keywords or []) if (k or "").strip()]
+    if len(keywords) <= 1:
+        return needs_user_choice(items, keywords[0] if keywords else "")
+    return False
+
+
 def public_item(item: dict) -> dict:
     download = item.get("downloadurl") or "/manual"
     if not str(download).startswith("http"):
-        download = OFFICIAL_BASE + download
+        files = str(item.get("files") or "")
+        site = "en" if "global-mgitech.com" in files else "zh"
+        cfg = official_site(site)
+        download = cfg["base"] + download
+    else:
+        site = "en" if "global-mgitech.com" in str(download) else "zh"
+        cfg = official_site(site)
     return {
         "official_id": item.get("id") or item.get("official_id"),
         "title": item.get("title") or "",
@@ -264,36 +499,79 @@ def public_item(item: dict) -> dict:
         "files": item.get("files") or "",
         "updatetime": item.get("updatetime") or 0,
         "official_url": download,
+        "library_url": cfg["library_url"],
         "score": round(float(item.get("_score") or 0), 3),
     }
 
 
-def search_official_manuals(keyword: str, limit: int = 10, client: Optional[httpx.Client] = None) -> List[dict]:
+def _fetch_official_rows(http, cfg: dict, keyword: str, limit: int) -> List[dict]:
+    try:
+        if cfg.get("kind") == "en_wp":
+            params = {"q": keyword, "per_page": str(limit), "page": "1"}
+            if http is None:
+                resp = _requests_call(
+                    "GET",
+                    cfg["search_url"],
+                    params=params,
+                    headers=cfg["headers"],
+                    timeout=20,
+                )
+            else:
+                resp = http.get(cfg["search_url"], params=params, headers=cfg["headers"])
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict) or int(data.get("status") or 0) != 1:
+                return []
+            rows = data.get("items") or []
+            return [row for row in rows if isinstance(row, dict)]
+        payload = {
+            "page": 1,
+            "limit": limit,
+            "keyword": keyword,
+            "type": "",
+            "style": "",
+            "title": "",
+            "ref": "",
+            "pn": "",
+        }
+        resp = http.post(cfg["search_url"], json=payload, headers=cfg["headers"])
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") != 1:
+            return []
+        rows = ((data.get("data") or {}).get("data")) or []
+        return [row for row in rows if isinstance(row, dict)]
+    except OfficialSearchError:
+        raise
+    except Exception as exc:
+        raise OfficialSearchError(cfg.get("site") or "zh", cfg.get("library_url") or "", str(exc)) from exc
+
+
+def search_official_manuals(
+    keyword: str,
+    limit: int = 10,
+    client: Optional[httpx.Client] = None,
+    site: str = "zh",
+) -> List[dict]:
     keyword = (keyword or "").strip()
     if not keyword:
         return []
-    own_client = client is None
-    http = client or httpx.Client(timeout=20.0, follow_redirects=True)
+    cfg = official_site(site)
+    created_http = False
+    http = client
+    if http is None and cfg.get("kind") != "en_wp":
+        http = httpx.Client(timeout=20.0, follow_redirects=True)
+        created_http = True
     try:
         merged: List[dict] = []
         seen = set()
+        last_err = None
         for kw in keyword_variants(keyword):
-            payload = {
-                "page": 1,
-                "limit": limit,
-                "keyword": kw,
-                "type": "",
-                "style": "",
-                "title": "",
-                "ref": "",
-                "pn": "",
-            }
-            resp = http.post(SEARCH_URL, json=payload, headers=OFFICIAL_HEADERS)
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, dict) or data.get("status") != 1:
+            try:
+                rows = _fetch_official_rows(http, cfg, kw, limit)
+            except OfficialSearchError as exc:
+                last_err = exc
                 continue
-            rows = ((data.get("data") or {}).get("data")) or []
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -301,13 +579,46 @@ def search_official_manuals(keyword: str, limit: int = 10, client: Optional[http
                 if oid in seen:
                     continue
                 seen.add(oid)
-                merged.append(row)
+                merged.append(normalize_official_item(row, cfg["site"]))
             if merged:
                 break
+        if not merged and last_err:
+            raise last_err
     finally:
-        if own_client:
+        if created_http:
             http.close()
     return merged[:limit]
+
+
+def search_official_manuals_for_keywords(
+    keywords: List[str],
+    limit: int = 10,
+    client: Optional[httpx.Client] = None,
+    site: str = "zh",
+) -> List[dict]:
+    keywords = [k.strip() for k in (keywords or []) if (k or "").strip()]
+    if not keywords:
+        return []
+    created_http = False
+    http = client
+    if http is None and normalize_site(site) != "en":
+        http = httpx.Client(timeout=20.0, follow_redirects=True)
+        created_http = True
+    try:
+        merged: List[dict] = []
+        seen = set()
+        for kw in keywords:
+            for row in search_official_manuals(kw, limit=limit, client=http, site=site):
+                oid = row.get("id")
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                merged.append(row)
+        cap = max(limit, limit * len(keywords))
+        return merged[:cap]
+    finally:
+        if created_http:
+            http.close()
 
 
 def download_official_pdf(files_path: str, dest_path: str, client: Optional[httpx.Client] = None) -> None:
@@ -317,10 +628,45 @@ def download_official_pdf(files_path: str, dest_path: str, client: Optional[http
     url = rel if rel.startswith("http") else OFFICIAL_BASE + rel
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     tmp_path = dest_path + ".part"
+    if client is None and "global-mgitech.com" in url:
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = _requests_call(
+                    "GET",
+                    url,
+                    headers=EN_DOWNLOAD_HEADERS,
+                    timeout=120,
+                    stream=True,
+                    retries=1,
+                )
+                written = 0
+                with open(tmp_path, "wb") as fh:
+                    for chunk in resp.iter_content(65536):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > MAX_PDF_BYTES:
+                            raise ValueError("pdf too large")
+                        fh.write(chunk)
+                resp.close()
+                os.replace(tmp_path, dest_path)
+                return
+            except Exception as exc:
+                last_err = exc
+                logger.warning("en pdf download attempt %s failed: %s", attempt + 1, exc)
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                time.sleep(0.6 * (attempt + 1))
+        raise last_err
+    headers = EN_DOWNLOAD_HEADERS if "global-mgitech.com" in url else OFFICIAL_HEADERS
     own_client = client is None
     http = client or httpx.Client(timeout=120.0, follow_redirects=True)
     try:
-        with http.stream("GET", url, headers=OFFICIAL_HEADERS) as resp:
+        with http.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
             written = 0
             with open(tmp_path, "wb") as fh:

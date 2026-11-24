@@ -78,7 +78,7 @@ class QaDashboardApiTest(unittest.TestCase):
         finally:
             db.close()
 
-    def _add_turn(self, created_at, session_type="general", question="q", answer="ok", search_hit=1, user_id=1):
+    def _add_turn(self, created_at, session_type="general", question="q", answer="ok", search_hit=1, user_id=1, duration_ms=0):
         db = self.SessionLocal()
         try:
             sess = QaSession(user_id=user_id, session_type=session_type, title=question, created_at=created_at, updated_at=created_at)
@@ -90,6 +90,7 @@ class QaDashboardApiTest(unittest.TestCase):
                 role="assistant",
                 content=answer,
                 search_hit=search_hit,
+                duration_ms=duration_ms,
                 created_at=created_at + timedelta(seconds=1),
             ))
             db.commit()
@@ -132,3 +133,11 @@ class QaDashboardApiTest(unittest.TestCase):
 
         response = self.client.get("/api/qa/dashboard", params={"period": "today"})
         self.assertEqual(response.status_code, 403)
+
+    def test_dashboard_items_include_duration(self):
+        now_utc = datetime.utcnow() - timedelta(seconds=10)
+        self._add_turn(now_utc, question="timed-q", answer="timed-a", duration_ms=12500)
+
+        data = self.client.get("/api/qa/dashboard", params={"period": "today"}).json()
+        self.assertEqual(data["items"][0]["question"], "timed-q")
+        self.assertEqual(data["items"][0]["duration_ms"], 12500)
