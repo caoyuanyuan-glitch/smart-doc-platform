@@ -24,7 +24,7 @@
         </el-select>
         <el-button @click="handleFilterChange">查询</el-button>
         <el-button @click="resetFilters">重置</el-button>
-        <el-button type="primary" @click="showAddDialog = true">添加用户</el-button>
+        <el-button type="primary" @click="openAddDialog">添加用户</el-button>
       </div>
 
       <el-table :data="users" border v-loading="loading">
@@ -75,7 +75,7 @@
       </div>
     </div>
 
-    <el-dialog v-model="showAddDialog" title="添加用户" width="480px" @close="resetAddForm">
+    <el-dialog v-model="showAddDialog" title="添加用户" width="860px" @close="resetAddForm">
       <el-form :model="addForm" :rules="addRules" ref="addFormRef" label-width="100px">
         <el-form-item label="用户名" prop="username">
           <el-input v-model="addForm.username" placeholder="3-20位，字母/数字/下划线" />
@@ -98,6 +98,46 @@
             <el-radio label="disabled">禁用</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item v-if="addForm.role !== 'admin'" label="知识库权限" class="grant-form-item">
+          <p class="grant-hint">给该账号勾选可访问的文件夹。未勾选时，「写作规范」「资源库」默认可浏览和预览；下载、编辑、删除需单独勾选。</p>
+          <el-table
+            :data="grantFolders"
+            row-key="id"
+            border
+            default-expand-all
+            :tree-props="{ children: 'children' }"
+            v-loading="grantLoading"
+            class="grant-table"
+            max-height="360"
+          >
+            <el-table-column prop="name" label="文件夹" min-width="220" show-overflow-tooltip />
+            <el-table-column label="只读" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'read')" @change="(checked) => toggleGrantAction(row, 'read', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="预览" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'preview')" @change="(checked) => toggleGrantAction(row, 'preview', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="下载" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'download')" @change="(checked) => toggleGrantAction(row, 'download', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="编辑" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'edit')" @change="(checked) => toggleGrantAction(row, 'edit', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="删除" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'delete')" @change="(checked) => toggleGrantAction(row, 'delete', checked)" />
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showAddDialog = false">取消</el-button>
@@ -105,7 +145,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showEditDialog" title="编辑用户" width="480px" @close="resetEditForm">
+    <el-dialog v-model="showEditDialog" title="编辑用户" width="860px" @close="resetEditForm">
       <el-form :model="editForm" :rules="editRules" ref="editFormRef" label-width="100px">
         <el-form-item label="用户名">
           <el-input :model-value="editForm.username" disabled />
@@ -144,6 +184,46 @@
           </el-popconfirm>
           <span v-if="resetPwdResult" class="reset-result">{{ resetPwdResult }}</span>
         </el-form-item>
+        <el-form-item v-if="editForm.role !== 'admin'" label="知识库权限" class="grant-form-item">
+          <p class="grant-hint">给该账号勾选可访问的文件夹。未勾选时，「写作规范」「资源库」默认可浏览和预览；下载、编辑、删除需单独勾选。</p>
+          <el-table
+            :data="grantFolders"
+            row-key="id"
+            border
+            default-expand-all
+            :tree-props="{ children: 'children' }"
+            v-loading="grantLoading"
+            class="grant-table"
+            max-height="360"
+          >
+            <el-table-column prop="name" label="文件夹" min-width="220" show-overflow-tooltip />
+            <el-table-column label="只读" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'read')" @change="(checked) => toggleGrantAction(row, 'read', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="预览" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'preview')" @change="(checked) => toggleGrantAction(row, 'preview', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="下载" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'download')" @change="(checked) => toggleGrantAction(row, 'download', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="编辑" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'edit')" @change="(checked) => toggleGrantAction(row, 'edit', checked)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="删除" width="70" align="center">
+              <template #default="{ row }">
+                <el-checkbox :model-value="hasGrantAction(row, 'delete')" @change="(checked) => toggleGrantAction(row, 'delete', checked)" />
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showEditDialog = false">取消</el-button>
@@ -156,7 +236,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { userAPI } from '@/api'
+import { userAPI, knowledgeAPI } from '@/api'
 import { useUserStore } from '@/store/user'
 
 const userStore = useUserStore()
@@ -179,6 +259,16 @@ const editFormRef = ref(null)
 const resetPwdResult = ref('')
 const editingUserId = ref(null)
 const isEditingCurrentUser = computed(() => editingUserId.value === userStore.user?.id)
+const grantFolders = ref([])
+const grantLoading = ref(false)
+const GRANT_ACTION_ORDER = ['read', 'preview', 'download', 'edit', 'delete']
+const GRANT_ACTION_IMPLIES = {
+  read: ['read'],
+  preview: ['read', 'preview'],
+  download: ['read', 'preview', 'download'],
+  edit: ['read', 'preview', 'download', 'edit'],
+  delete: ['read', 'preview', 'download', 'edit', 'delete'],
+}
 
 const addForm = reactive({
   username: '',
@@ -257,11 +347,75 @@ function resetFilters() {
 function resetAddForm() {
   Object.assign(addForm, { username: '', password: '', display_name: '', role: 'user', status: 'active' })
   addFormRef.value?.resetFields()
+  grantFolders.value = []
 }
 
 function resetEditForm() {
   resetPwdResult.value = ''
   editingUserId.value = null
+  grantFolders.value = []
+}
+
+function cloneGrantTree(nodes) {
+  return (nodes || []).map((node) => ({
+    id: node.id,
+    name: node.name,
+    parent_id: node.parent_id,
+    actions: [...(node.actions || [])],
+    children: cloneGrantTree(node.children),
+  }))
+}
+
+function collectGrants(nodes, acc = []) {
+  for (const node of nodes || []) {
+    if ((node.actions || []).length) {
+      acc.push({ folder_id: node.id, actions: [...node.actions] })
+    }
+    if (node.children?.length) {
+      collectGrants(node.children, acc)
+    }
+  }
+  return acc
+}
+
+function hasGrantAction(row, action) {
+  return (row.actions || []).includes(action)
+}
+
+function toggleGrantAction(row, action, checked) {
+  if (checked) {
+    row.actions = [...(GRANT_ACTION_IMPLIES[action] || [action])]
+    return
+  }
+  const idx = GRANT_ACTION_ORDER.indexOf(action)
+  row.actions = idx > 0 ? GRANT_ACTION_ORDER.slice(0, idx) : []
+}
+
+async function loadGrantTree(userId = null) {
+  grantLoading.value = true
+  try {
+    const resp = userId
+      ? await knowledgeAPI.getUserGrants(userId)
+      : await knowledgeAPI.getGrantTree()
+    grantFolders.value = cloneGrantTree(resp.data.folders || [])
+  } catch (e) {
+    grantFolders.value = []
+    ElMessage.error(e.response?.data?.detail || '加载文件夹权限失败')
+  } finally {
+    grantLoading.value = false
+  }
+}
+
+async function saveUserGrants(userId, role) {
+  if (!userId) return
+  const grants = role === 'admin' ? [] : collectGrants(grantFolders.value)
+  await knowledgeAPI.updateUserGrants(userId, { grants })
+}
+
+async function openAddDialog() {
+  resetAddForm()
+  showAddDialog.value = true
+  await loadGrantTree()
 }
 
 async function handleAddUser() {
@@ -269,7 +423,8 @@ async function handleAddUser() {
   if (!valid) return
   adding.value = true
   try {
-    await userAPI.create({ ...addForm })
+    const created = await userAPI.create({ ...addForm })
+    await saveUserGrants(created.data.id, addForm.role)
     ElMessage.success('用户已创建')
     showAddDialog.value = false
     await loadUsers()
@@ -290,6 +445,7 @@ function openEditDialog(row) {
   })
   resetPwdResult.value = ''
   showEditDialog.value = true
+  loadGrantTree(row.id)
 }
 
 async function handleEditUser() {
@@ -308,6 +464,7 @@ async function handleEditUser() {
         display_name: editForm.display_name,
       })
     }
+    await saveUserGrants(editingUserId.value, editForm.role)
     ElMessage.success('用户已更新')
     showEditDialog.value = false
     await loadUsers()
@@ -383,5 +540,17 @@ onMounted(() => loadUsers())
 
 .self-protection-alert {
   margin-bottom: 18px;
+}
+.grant-form-item {
+  align-items: flex-start;
+}
+.grant-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+.grant-table {
+  width: 100%;
 }
 </style>

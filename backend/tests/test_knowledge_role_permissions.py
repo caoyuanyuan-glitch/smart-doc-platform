@@ -118,6 +118,8 @@ class KnowledgeRolePermissionTestCase(unittest.TestCase):
         self.assertEqual(tree.status_code, 200)
         names = {node["name"] for node in tree.json()}
         self.assertEqual(names, {"写作规范", "资源库"})
+        writing_node = next(node for node in tree.json() if node["name"] == "写作规范")
+        self.assertEqual(sorted(writing_node["actions"]), ["preview", "read"])
 
         writing = self.client.get(
             f"/api/knowledge/folders/{ids['writing_id']}",
@@ -157,7 +159,7 @@ class KnowledgeRolePermissionTestCase(unittest.TestCase):
         )
         self.assertEqual(preview.status_code, 200)
 
-    def test_user_cannot_create_root_folder_but_can_edit_visible_files(self):
+    def test_user_cannot_create_root_folder_or_edit_without_grant(self):
         ids = self._seed_trees()
         headers = self._auth_headers("normal_user")
 
@@ -169,20 +171,20 @@ class KnowledgeRolePermissionTestCase(unittest.TestCase):
             json={"name": "风格", "parent_id": ids["writing_id"]},
             headers=headers,
         )
-        self.assertEqual(create_sub.status_code, 200)
+        self.assertEqual(create_sub.status_code, 403)
 
         edit = self.client.put(
             f"/api/knowledge/files/{ids['writing_file_id']}/content",
             json={"content": "changed"},
             headers=headers,
         )
-        self.assertEqual(edit.status_code, 200)
+        self.assertEqual(edit.status_code, 403)
 
         download = self.client.get(
             f"/api/knowledge/files/{ids['writing_file_id']}/download",
             headers=headers,
         )
-        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.status_code, 403)
 
         hidden_edit = self.client.put(
             f"/api/knowledge/files/{ids['agent_file_id']}/content",

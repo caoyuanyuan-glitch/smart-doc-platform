@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
 from datetime import datetime
@@ -46,3 +47,18 @@ class KnowledgeFileCall(Base):
     username = Column(String, default="guest")
     duration_ms = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class UserKnowledgeGrant(Base):
+    __tablename__ = "user_knowledge_grants"
+    __table_args__ = (
+        UniqueConstraint("user_id", "folder_id", name="uq_user_folder_grant"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    folder_id = Column(Integer, nullable=False, index=True)
+    actions = Column(String, nullable=False, default="")
+    granted_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
