@@ -240,21 +240,6 @@
     <div v-else-if="currentView === 'paragraph'">
       <div class="panel continuation-panel">
         <div class="continuation-card">
-          <div class="continuation-card-head">
-            <div class="continuation-icon">
-              <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true">
-                <circle cx="24" cy="24" r="24" fill="#409EFF"/>
-                <path fill="#fff" d="M17.2 12.5h9.4L32.8 18.8V34.2c0 1.1-.9 2-2 2H17.2c-1.1 0-2-.9-2-2V14.5c0-1.1.9-2 2-2Z"/>
-                <path fill="#409EFF" d="M26.4 12.5V18.6h6.2"/>
-                <path stroke="#409EFF" stroke-width="1.8" stroke-linecap="round" d="M19.4 24.2h9.2M19.4 28.2h6.6"/>
-              </svg>
-            </div>
-            <div class="continuation-title-wrap">
-              <span class="continuation-title">智能续写</span>
-              <span class="continuation-subtitle">片段生成完整内容</span>
-            </div>
-          </div>
-
           <el-form :model="paragraphForm" label-width="130px" class="form-layout continuation-form">
             <div class="template-switch-row">
               <span class="template-switch-label">参考模板文件</span>
