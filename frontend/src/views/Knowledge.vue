@@ -32,7 +32,7 @@
               :current-folder-id="currentFolderId"
               :expanded-ids="expandedNodeIds"
               :context-folder-id="folderMenu.visible ? folderMenu.folder.id : null"
-              :enable-context-menu="canManageKnowledge"
+              :enable-context-menu="true"
               @toggle="handleToggle"
               @select="handleFolderSelect"
               @contextmenu="handleFolderContextMenu"
@@ -70,7 +70,7 @@
                   <span class="file-count">共 {{ currentFiles.length }} 个文件</span>
                 </div>
                 <el-upload
-                  v-if="canManageKnowledge"
+                  v-if="canUploadFiles"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -110,28 +110,28 @@
                     {{ formatDateTime(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" :width="canManageKnowledge ? 480 : 120" fixed="right" align="center">
+                <el-table-column label="操作" :width="actionColumnWidth" fixed="right" align="center">
                   <template #default="{ row }">
-                    <el-button class="table-action-btn" size="small" @click="handlePreviewFile(row)">
+                    <el-button v-if="canPreviewFiles" class="table-action-btn" size="small" @click="handlePreviewFile(row)">
                       <el-icon><View /></el-icon>
                       预览
                     </el-button>
-                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" :disabled="!canDownloadFile(row)" @click="handleDownloadFile(row)">
+                    <el-button v-if="canDownloadFiles" class="table-action-btn" size="small" @click="handleDownloadFile(row)">
                       <el-icon><Download /></el-icon>
                       下载
                     </el-button>
-                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" @click="showMoveFile(row)">
+                    <el-button v-if="canEditFiles" class="table-action-btn" size="small" @click="showMoveFile(row)">
                       <svg class="inline-move-icon" viewBox="0 0 1024 1024" aria-hidden="true">
                         <path fill="currentColor" d="M896 301.653333L618.24 64a77.226667 77.226667 0 0 0-14.933333-11.52L597.333333 50.346667h-2.986666A72.533333 72.533333 0 0 0 567.466667 42.666667H178.773333A72.106667 72.106667 0 0 0 106.666667 114.773333v794.453334A72.106667 72.106667 0 0 0 178.773333 981.333333h298.666667a35.84 35.84 0 0 0 0-71.68h-298.666667V114.773333h354.56v197.12A72.106667 72.106667 0 0 0 605.44 384h240.213333v164.693333a35.84 35.84 0 0 0 71.68 0v-196.266666a72.106667 72.106667 0 0 0-21.333333-50.773334z m-290.986667 10.24V153.173333l199.68 158.72z" />
                         <path fill="currentColor" d="M906.666667 760.32l-98.986667-98.986667a35.84 35.84 0 0 0-50.773333 50.773334l37.973333 37.973333h-384v-85.333333a35.84 35.84 0 0 0-71.68 0v122.026666a35.84 35.84 0 0 0 35.84 35.84h420.266667l-37.973334 37.973334a35.84 35.84 0 0 0 50.773334 50.773333L906.666667 810.666667a35.84 35.84 0 0 0 0-50.346667z" />
                       </svg>
                       移动
                     </el-button>
-                    <el-button v-if="canManageKnowledge && isEditableType(row)" class="table-action-btn" size="small" :disabled="!canEditFile(row)" type="warning" @click="openEditDialog(row)">
+                    <el-button v-if="canEditFiles && isEditableType(row)" class="table-action-btn" size="small" type="warning" @click="openEditDialog(row)">
                       <el-icon><Edit /></el-icon>
                       编辑
                     </el-button>
-                    <el-button v-if="canManageKnowledge" class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
+                    <el-button v-if="canDeleteFiles" class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
                       <el-icon><Delete /></el-icon>
                       删除
                     </el-button>
@@ -162,7 +162,7 @@
                   <span class="file-count">共 {{ currentSubfolders.length }} 个</span>
                 </div>
                 <el-upload
-                  v-if="canManageKnowledge"
+                  v-if="canUploadFiles"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -198,7 +198,7 @@
                   <span class="files-title">文件列表</span>
                 </div>
                 <el-upload
-                  v-if="canManageKnowledge"
+                  v-if="canUploadFiles"
                   ref="uploadRef"
                   action=""
                   :auto-upload="false"
@@ -215,7 +215,7 @@
               </div>
               <div class="files-empty-inline">
                 <el-icon :size="36" color="#cbd5e1"><FolderOpened /></el-icon>
-                <p>{{ canManageKnowledge ? '暂无文件，请上传' : '暂无文件' }}</p>
+                <p>{{ canUploadFiles ? '暂无文件，请上传' : '暂无文件' }}</p>
               </div>
             </template>
           </template>
@@ -263,7 +263,7 @@
           <span class="move-path-label">目标路径</span>
           <span class="move-path-value">{{ selectedMoveTargetLabel || '请选择目标路径' }}</span>
         </div>
-        <div v-if="moveTargetType === 'folder'" class="move-root-option">
+        <div v-if="moveTargetType === 'folder' && userStore.isAdmin" class="move-root-option">
           <el-button
             size="small"
             :type="moveDestinationId === null ? 'primary' : 'default'"
@@ -312,17 +312,17 @@
 
     <teleport to="body">
       <ul
-        v-if="folderMenu.visible && canManageKnowledge"
+        v-if="folderMenu.visible"
         ref="folderMenuRef"
         class="folder-context-menu"
         :style="{ left: folderMenu.x + 'px', top: folderMenu.y + 'px' }"
         @click.stop
         @contextmenu.prevent
       >
-        <li v-if="canManageKnowledge" @click="onFolderMenuAction('create-sub')">新建子文件夹</li>
-        <li v-if="canManageKnowledge" @click="onFolderMenuAction('move')">移动</li>
-        <li v-if="canManageKnowledge" @click="onFolderMenuAction('rename')">重命名</li>
-        <li v-if="userStore.isAdmin" class="is-danger" @click="onFolderMenuAction('delete')">删除</li>
+        <li v-if="canFolderAction(folderMenu.folder, 'edit')" @click="onFolderMenuAction('create-sub')">新建子文件夹</li>
+        <li v-if="canFolderAction(folderMenu.folder, 'edit')" @click="onFolderMenuAction('move')">移动</li>
+        <li v-if="canFolderAction(folderMenu.folder, 'edit')" @click="onFolderMenuAction('rename')">重命名</li>
+        <li v-if="canFolderAction(folderMenu.folder, 'delete')" class="is-danger" @click="onFolderMenuAction('delete')">删除</li>
       </ul>
     </teleport>
   </div>
@@ -344,15 +344,42 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-const canManageKnowledge = computed(() => userStore.isAdmin)
-
-function canDownloadFile(file) {
-  return true
+const GRANT_ACTION_ORDER = ['read', 'preview', 'download', 'edit', 'delete']
+const GRANT_ACTION_IMPLIES = {
+  read: ['read'],
+  preview: ['read', 'preview'],
+  download: ['read', 'preview', 'download'],
+  edit: ['read', 'preview', 'download', 'edit'],
+  delete: ['read', 'preview', 'download', 'edit', 'delete'],
 }
 
-function canEditFile(file) {
-  return true
+function currentFolderActions() {
+  if (userStore.isAdmin) return GRANT_ACTION_ORDER
+  return currentFolder.value?.actions || []
 }
+
+function hasCurrentAction(action) {
+  return currentFolderActions().includes(action)
+}
+
+function canFolderAction(folder, action) {
+  if (userStore.isAdmin) return true
+  return (folder?.actions || []).includes(action)
+}
+
+const canUploadFiles = computed(() => hasCurrentAction('edit'))
+const canPreviewFiles = computed(() => hasCurrentAction('preview'))
+const canDownloadFiles = computed(() => hasCurrentAction('download'))
+const canEditFiles = computed(() => hasCurrentAction('edit'))
+const canDeleteFiles = computed(() => hasCurrentAction('delete'))
+const actionColumnWidth = computed(() => {
+  let width = 0
+  if (canPreviewFiles.value) width += 90
+  if (canDownloadFiles.value) width += 90
+  if (canEditFiles.value) width += 180
+  if (canDeleteFiles.value) width += 90
+  return Math.max(width, 90)
+})
 
 // -------- 文件夹树 --------
 const folderTree = ref([])
@@ -564,7 +591,7 @@ function clampFolderMenu() {
 }
 
 function handleFolderContextMenu({ node, event }) {
-  if (!canManageKnowledge.value) return
+  if (!(userStore.isAdmin || canFolderAction(node, 'edit') || canFolderAction(node, 'delete'))) return
   folderMenu.value = {
     visible: true,
     x: event.clientX,
@@ -812,8 +839,8 @@ async function loadFolderContent(id) {
 }
 
 async function handleFileChange(file) {
-  if (!canManageKnowledge.value) {
-    ElMessage.warning('审核员不能上传文件')
+  if (!canUploadFiles.value) {
+    ElMessage.warning('没有该文件夹的编辑权限')
     return
   }
   if (!folderId.value) {

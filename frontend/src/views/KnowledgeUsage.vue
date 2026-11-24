@@ -56,7 +56,7 @@
     </div>
 
     <div class="table-card">
-      <el-table :data="summary.items" v-loading="loading" stripe empty-text="暂无调用记录" @row-click="openDetails">
+      <el-table :data="pagedItems" v-loading="loading" stripe empty-text="暂无调用记录" @row-click="openDetails">
         <el-table-column prop="file_name" label="文件" min-width="220" show-overflow-tooltip />
         <el-table-column prop="folder_path" label="所在目录" min-width="180" show-overflow-tooltip />
         <el-table-column prop="call_count" label="调用次数" width="110" />
@@ -73,6 +73,17 @@
           <template #default="{ row }">{{ formatTime(row.last_called_at) }}</template>
         </el-table-column>
       </el-table>
+      <div class="pagination-wrap">
+        <el-pagination
+          background
+          layout="total, sizes, prev, pager, next"
+          :total="tableTotal"
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="[20, 30, 50]"
+          @size-change="handleSizeChange"
+        />
+      </div>
     </div>
 
     <el-drawer v-model="detailVisible" :title="detailTitle" size="520px">
@@ -109,10 +120,23 @@ const dateRange = ref([])
 const moduleFilter = ref('')
 const keyword = ref('')
 const selectedFile = ref(null)
+const page = ref(1)
+const pageSize = ref(20)
 const summary = ref({ file_count: 0, total_calls: 0, total_duration_ms: 0, items: [] })
 const details = ref({ items: [] })
 
 const detailTitle = computed(() => selectedFile.value?.file_name || '调用明细')
+const tableTotal = computed(() => (summary.value.items || []).length)
+const pagedItems = computed(() => {
+  const items = summary.value.items || []
+  const start = (page.value - 1) * pageSize.value
+  return items.slice(start, start + pageSize.value)
+})
+
+function handleSizeChange(value) {
+  pageSize.value = value
+  page.value = 1
+}
 
 function queryParams() {
   const params = {}
@@ -256,6 +280,7 @@ function onModuleChartClick(params) {
 
 async function loadSummary() {
   loading.value = true
+  page.value = 1
   try {
     const resp = await knowledgeAPI.getUsageSummary(queryParams())
     summary.value = resp.data || summary.value
@@ -343,6 +368,11 @@ onMounted(loadSummary)
 .chart-title { font-size: 15px; font-weight: 600; color: #1c1917; }
 .chart-note { font-size: 12px; color: #78716c; }
 .table-card { padding: 8px; }
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 8px 4px;
+}
 .module-chip {
   display: inline-flex;
   margin-right: 6px;

@@ -520,6 +520,11 @@ export const knowledgeAPI = {
   updateFileContent: (fileId, content) => instance.put(`/knowledge/files/${fileId}/content`, { content }),
   updateFilePermission: (fileId, data) => instance.put(`/knowledge/files/${fileId}/permission`, data),
   updateFolderPermission: (folderId, data) => instance.put(`/knowledge/folders/${folderId}/permission`, data),
+  getFolderGrants: (folderId) => instance.get(`/knowledge/folders/${folderId}/grants`),
+  updateFolderGrants: (folderId, data) => instance.put(`/knowledge/folders/${folderId}/grants`, data),
+  getGrantTree: () => instance.get('/knowledge/grant-tree'),
+  getUserGrants: (userId) => instance.get(`/knowledge/users/${userId}/grants`),
+  updateUserGrants: (userId, data) => instance.put(`/knowledge/users/${userId}/grants`, data),
   getUsageSummary: (params = {}) => instance.get('/knowledge/usage/summary', { params }),
   getUsageFileDetails: (fileId, params = {}) => instance.get(`/knowledge/usage/files/${fileId}`, { params })
 }
