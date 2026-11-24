@@ -110,10 +110,14 @@ def check_tight_degree_unit(text: str, *, parsed: bool = True) -> list[dict]:
         if not tight or spaced < 1:
             continue
         for m in tight:
+            # 实际命中的单位形（如 7.68TB 里的 TB）——GB|TB|MB|KB、mL|µL、bp|kb
+            # 共用一条正则，建议文案须用命中单位而非组名
+            hit_unit = re.search(r"[A-Za-zµμ°]+|℃", m.group(0))
+            display = hit_unit.group(0) if hit_unit else unit
             issues.append(_issue(
                 source, m.start(), m.end(), m.group(0), "DET-CN-UNITSPACE", "数值与单位写法",
-                f"数字与单位 {unit} 之间缺少空格，与全文带空格写法（{spaced} 处）混用不一致。",
-                f"建议在数字与 {unit} 之间添加空格。",
+                f"数字与单位 {display} 之间缺少空格，与全文带空格写法（{spaced} 处）混用不一致。",
+                f"建议在数字与 {display} 之间添加空格。",
                 confidence=80,
                 basis="数字与单位书写规范 - 数值与单位间距",
             ))
