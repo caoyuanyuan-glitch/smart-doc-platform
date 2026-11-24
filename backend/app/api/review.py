@@ -11289,6 +11289,14 @@ def _run_manual_engineering_audit(content, file_type=None):
     for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
         art, word = match.group(1).lower(), match.group(2)
         wl = word.lower()
+        # 侧别标签/单位守卫：同行内大写 "A" 紧跟在字母数字之后（如 "side A outward"、
+        # "Flow cell A operation"、"32 A industrial"）属于侧别标记或安培单位，不是冠词。
+        # 仅同行前一字符为空格且再前一位是字母数字时触发；行首/句首的大写 A 不受影响。
+        if match.group(1) == 'A' and match.start() >= 2:
+            _an_prev1 = content[match.start() - 1]
+            _an_prev2 = content[match.start() - 2]
+            if _an_prev1 in ' \t' and _an_prev2.isalnum():
+                continue
         if len(word) == 1 or not word.isalpha() or wl in _AN_SKIP_WORDS:
             continue
         abbr_article = _abbrev_article(word)
@@ -11682,12 +11690,25 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 全文一致性守卫：先统计同一词形"带空格 word ("与"无空格 word("的出现次数。
+    # 只有无空格写法属于少数派（带空格为全文主写法）时才报，避免把全文统一的无空格
+    # 主写法（如 T7 EN 中 26 处 "Buffer("）整批误报为需要加空格。
+    _fmt003_space_counts = {}
+    _fmt003_nospace_counts = {}
+    for _m in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})[ \t]+\(', content):
+        _fmt003_space_counts[_m.group(1)] = _fmt003_space_counts.get(_m.group(1), 0) + 1
+    for _m in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\([A-Za-z0-9]', content):
+        _fmt003_nospace_counts[_m.group(1)] = _fmt003_nospace_counts.get(_m.group(1), 0) + 1
+
     for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\(([A-Za-z0-9][A-Za-z0-9 ./%+\-]{0,20})\)', content):
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
         if re.search(r'\b(?:Table|Figure|Chapter)\b', original, re.IGNORECASE):
             continue
         # 括号内为纯数值/进度计数（如 Progress(10/302)）时属于界面标签，非术语加括号说明
         if not re.search(r'[A-Za-z]', match.group(2)):
+            continue
+        # 主写法守卫：该词形无空格写法不少于带空格写法时，无空格即主写法，不报
+        if _fmt003_space_counts.get(match.group(1), 0) <= _fmt003_nospace_counts.get(match.group(1), 0):
             continue
         add_issue(
             match.start(),
@@ -13387,10 +13408,15 @@ def dedupe_issues_by_original(issues):
         for index, existing in enumerate(seen):
             existing_chapter = _norm_chapter(existing.get("chapter"))
             issue_chapter = _norm_chapter(issue.get("chapter"))
-            if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
-                continue
             existing_page = issue_identity_key(existing)[3]
             issue_page = key[3]
+            # 章节不同不直接排除：规则与 AI 对同一问题常提取出不同章节名
+            # （实测 T7 EN p181「测序停止」rule/AI 同文本同页因章节闸门漏折叠）。
+            # 页码一致时章节差异不作排除依据。
+            pages_agree = bool(existing_page and issue_page and existing_page == issue_page)
+            if (issue_chapter and existing_chapter and issue_chapter != existing_chapter
+                    and not pages_agree):
+                continue
             if existing_page and issue_page and existing_page != issue_page:
                 continue
             if _char_spans_disjoint(_issue_char_span(existing), _issue_char_span(issue)):
@@ -13398,8 +13424,11 @@ def dedupe_issues_by_original(issues):
                 continue
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
-                and issue_chapter == existing_chapter
-                and issue_identity_key(existing)[5] == key[5]
+                and (
+                    (issue_chapter == existing_chapter
+                     and issue_identity_key(existing)[5] == key[5])
+                    or pages_agree
+                )
             ):
                 matched_index = index
                 break
