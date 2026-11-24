@@ -130,9 +130,6 @@
               </template>
             </div>
           </el-popover>
-          <el-badge v-if="userStore.isAdmin" :value="unreadFeedbackCount" :hidden="unreadFeedbackCount === 0" class="feedback-badge">
-            <el-icon class="feedback-icon" @click="goToFeedback"><Message /></el-icon>
-          </el-badge>
           <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.roleLabel }})</span>
           <el-button text @click="handleLogout" class="logout-btn">退出</el-button>
         </div>
@@ -240,6 +237,12 @@
               <el-menu-item v-if="userStore.isAdmin" index="/qa/dashboard">统计面板</el-menu-item>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
               <el-menu-item index="/qa/manual">说明书问答</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/qa/feedback">
+                <span class="menu-item-with-badge">
+                  问题反馈
+                  <el-badge :value="unreadFeedbackCount" :hidden="!unreadFeedbackCount" class="feedback-menu-badge" />
+                </span>
+              </el-menu-item>
               <el-sub-menu v-if="userStore.isAdmin" index="qa-history-sub" class="qa-history-sub">
                 <template #title><span>历史记录</span></template>
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
@@ -299,7 +302,7 @@ import AgentDock from '@/components/AgentDock.vue'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, DataAnalysis, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
-  Edit, Setting, Message
+  Edit, Setting
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -345,10 +348,6 @@ function toggleCollapse() {
 function handleLogout() {
   userStore.logout()
   router.push('/login')
-}
-
-function goToFeedback() {
-  router.push('/feedback')
 }
 
 const aiStatusClass = computed(() => {
@@ -853,16 +852,28 @@ body {
   border-radius: 10px;
 }
 
-.feedback-badge {
-  margin-right: 16px;
+.feedback-menu-badge {
+  margin-left: 0;
+  line-height: 1;
 }
-.feedback-icon {
-  font-size: 22px;
-  color: rgba(255, 255, 255, 0.9);
-  cursor: pointer;
+.menu-item-with-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.feedback-icon:hover {
-  color: #fff;
+.feedback-menu-badge .el-badge__content {
+  position: static;
+  transform: none;
+  top: auto;
+  right: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  min-width: 16px;
+  padding: 0 5px;
+  line-height: 16px;
+  border-radius: 8px;
 }
 
 .sidebar {

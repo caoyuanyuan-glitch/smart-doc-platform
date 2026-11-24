@@ -203,6 +203,12 @@ const routes = [
     meta: { adminOnly: true }
   },
   {
+    path: '/qa/feedback',
+    name: 'Feedback',
+    component: Feedback,
+    meta: { adminOnly: true }
+  },
+  {
     path: '/generate',
     name: 'Generate',
     redirect: '/generate/image-descriptions'
@@ -321,9 +327,7 @@ const routes = [
   },
   {
     path: '/feedback',
-    name: 'Feedback',
-    component: Feedback,
-    meta: { adminOnly: true }
+    redirect: '/qa/feedback'
   }
 ]
 

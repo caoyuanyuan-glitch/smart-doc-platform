@@ -394,6 +394,7 @@ export const manualAPI = {
   query: (payload) => instance.post('/manual/query', payload, { timeout: 600000 }),
   getPreviewUrl: (fileId) => `/api/manual/preview/${fileId}`,
   previewBlob: (fileId) => instance.get(`/manual/preview/${fileId}`, { responseType: 'blob' }),
+  pageImage: (fileId, page) => instance.get(`/manual/page-image/${fileId}/${page}`, { responseType: 'blob' }),
   getDownloadUrl: (fileId) => `/api/manual/download/${fileId}`,
   getSessions: () => instance.get('/manual/sessions'),
   getSessionDetail: (sessionId) => instance.get(`/manual/sessions/${sessionId}`),

@@ -15,7 +15,7 @@
       <section class="home-main">
         <div class="scene-grid">
           <button
-            v-for="card in SCENE_CARDS"
+            v-for="card in HOME_SCENE_CARDS"
             :key="card.key"
             class="scene-card"
             :style="{ '--accent': card.accent }"
@@ -31,18 +31,24 @@
           </button>
         </div>
 
-        <div class="quick-ask">
-          <div class="quick-ask-head">快捷问法</div>
-          <button
-            v-for="item in GLOBAL_SUGGESTIONS"
-            :key="item"
-            class="quick-ask-item"
-            type="button"
-            :disabled="loading"
-            @click="sendQuestion(item)"
-          >
-            {{ item }}
-          </button>
+        <div class="recent-ask">
+          <div class="side-head">
+            <span>最近问答</span>
+            <el-button v-if="userStore.isAdmin && sessionList.length" size="small" text @click="goHistory">全部</el-button>
+          </div>
+          <div v-if="!sessionList.length" class="side-empty">提问后，会话会显示在这里</div>
+          <div v-else class="recent-ask-list">
+            <button
+              v-for="s in sessionList.slice(0, 8)"
+              :key="s.id"
+              class="side-item"
+              type="button"
+              @click="loadSession(s.id)"
+            >
+              <span class="side-item-title">{{ s.title }}</span>
+              <span class="side-item-time">{{ formatTime(s.updated_at) }}</span>
+            </button>
+          </div>
         </div>
 
         <div class="chat-input home-input">
@@ -59,28 +65,22 @@
           <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
         </div>
       </section>
-
-      <aside class="home-side">
-        <div class="side-head">
-          <span>最近问答</span>
-          <el-button v-if="sessionList.length" size="small" text @click="goHistory">全部</el-button>
-        </div>
-        <div v-if="!sessionList.length" class="side-empty">提问后，会话会显示在这里</div>
-        <button
-          v-for="s in sessionList.slice(0, 8)"
-          :key="s.id"
-          class="side-item"
-          type="button"
-          @click="loadSession(s.id)"
-        >
-          <span class="side-item-title">{{ s.title }}</span>
-          <span class="side-item-time">{{ formatTime(s.updated_at) }}</span>
-        </button>
-      </aside>
     </div>
 
     <section v-else class="chat-panel">
       <div class="chat-toolbar">
+        <div class="selected-tags">
+          <span class="selected-tags-label">当前范围：</span>
+          <template v-if="activeScene">
+            <el-tag size="small" closable @close="backToScenes">{{ activeScene.title }}</el-tag>
+          </template>
+          <template v-else>
+            <el-tag size="small">写作规范</el-tag>
+            <el-tag size="small">资源库</el-tag>
+            <span class="scope-hint">全局检索</span>
+          </template>
+        </div>
+        <div class="chat-toolbar-actions">
         <el-button size="small" text @click="newConversation" :disabled="messages.length <= 1">
           <el-icon><Plus /></el-icon> 新建会话
         </el-button>
@@ -100,19 +100,9 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        </div>
       </div>
       <div class="chat-messages" ref="chatBox">
-        <div class="selected-tags">
-          <span class="selected-tags-label">当前范围：</span>
-          <template v-if="activeScene">
-            <el-tag size="small" closable @close="backToScenes">{{ activeScene.title }}</el-tag>
-          </template>
-          <template v-else>
-            <el-tag size="small">写作规范</el-tag>
-            <el-tag size="small">资源库</el-tag>
-            <span class="scope-hint">全局检索</span>
-          </template>
-        </div>
         <div v-if="showInitialSuggestions" class="recommendations">
           <div v-if="initialSuggestionsLoading" class="recommendations-loading">
             <span v-for="n in 4" :key="n" class="skeleton-line"></span>
@@ -153,7 +143,12 @@
             </el-icon>
           </div>
           <div class="bubble-wrap">
-            <div class="bubble">{{ msg.content }}</div>
+            <div
+              v-if="msg.role === 'assistant'"
+              class="bubble bubble-md"
+              v-html="renderAnswerHtml(msg.content)"
+            ></div>
+            <div v-else class="bubble">{{ msg.content }}</div>
             <div v-if="msg.sources && msg.sources.length" class="sources">
               <div class="sources-title">参考来源：</div>
               <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="source-item">{{ s.title || s }}</div>
@@ -289,45 +284,36 @@ const SCENE_CARDS = [
   {
     key: 'style',
     kicker: '写作规范',
-    title: '查写作规范与风格',
-    desc: '中英文技术文档的语气、用词、标题与版式约定',
+    title: '查规范与自检',
+    desc: '风格约定、常见错误、Checklist 与发布前核对项',
     accent: '#1d4ed8',
-    paths: [['写作规范', '写作风格指南']],
-    suggestions: [
-      '中文技术文档标题和术语该怎么写',
-      '英文说明书的语气和句式有哪些要求',
-      '风格指南里最容易忽略的点是什么'
-    ]
-  },
-  {
-    key: 'sentence',
-    kicker: '句式清单',
-    title: '找表达句式',
-    desc: '建库试剂、自动化等说明书里可直接套用的表达',
-    accent: '#0f766e',
-    paths: [['写作规范', '句式清单']],
-    suggestions: [
-      '建库试剂说明书常用句式有哪些',
-      '自动化说明书里操作步骤该怎么写',
-      '平台反馈过哪些需要统一的句式'
-    ]
-  },
-  {
-    key: 'review',
-    kicker: '审核自检',
-    title: '内容审核与自检',
-    desc: '常见错误、审核规则、Checklist 与发布前核对项',
-    accent: '#b45309',
     paths: [
+      ['写作规范', '写作风格指南'],
       ['写作规范', '常见错误清单'],
       ['写作规范', '技术文档审核规则库'],
       ['写作规范', '说明书自检checklist'],
       ['写作规范', '审核依据汇总']
     ],
     suggestions: [
+      '中文技术文档标题和术语该怎么写',
       '发布前我应该按哪些项做自检',
-      '技术文档常见错误有哪些',
       '说明书审核时要重点核对什么'
+    ]
+  },
+  {
+    key: 'phrase',
+    kicker: '句式与记忆',
+    title: '找句式和译法',
+    desc: '说明书可套用的表达，以及已审核的中英对照',
+    accent: '#0f766e',
+    paths: [
+      ['写作规范', '句式清单'],
+      ['资源库', '记忆库']
+    ],
+    suggestions: [
+      '建库试剂说明书常用句式有哪些',
+      '这段中文在记忆库里有没有现成译法',
+      '记忆库里有哪些可复用的句对'
     ]
   },
   {
@@ -344,20 +330,8 @@ const SCENE_CARDS = [
     ]
   },
   {
-    key: 'tm',
-    kicker: '记忆库',
-    title: '中英互译',
-    desc: '已审核语料和记忆库条目，用来对照既有译法',
-    accent: '#6d28d9',
-    paths: [['资源库', '记忆库']],
-    suggestions: [
-      '这段中文在记忆库里有没有现成译法',
-      'T7 相关语料是怎么翻译的',
-      '记忆库里有哪些可复用的句对'
-    ]
-  },
-  {
     key: 'files',
+    home: false,
     kicker: '文件资料',
     title: '找文件资料',
     desc: '说明书、手册和产品介绍等原始资料',
@@ -370,6 +344,8 @@ const SCENE_CARDS = [
     ]
   }
 ]
+
+const HOME_SCENE_CARDS = SCENE_CARDS.filter(card => card.home !== false)
 
 const GLOBAL_SUGGESTIONS = [
   '中文技术文档写作有哪些必须遵守的规范',
@@ -596,7 +572,7 @@ async function loadSession(id) {
     askedUnscoped.value = true
     messages.value = (d.messages || []).map(m => ({
       role: m.role,
-      content: m.content,
+      content: m.role === 'assistant' ? cleanAnswer(m.content) : m.content,
       sources: m.sources || [],
       rating: m.rating || 0,
       suggestions: []
@@ -675,7 +651,7 @@ async function sendQuestion(q) {
     if (data.session_id) sessionId.value = data.session_id
     messages.value.push({
       role: 'assistant',
-      content: data.answer || '知识库中未找到相关信息。',
+      content: cleanAnswer(data.answer || '知识库中未找到相关信息。'),
       sources: data.sources || [],
       rating: 0,
       suggestions: data.suggestions || []
@@ -744,7 +720,7 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
     if (msg.role === 'user') {
       html += `<div class="q">Q: ${escapeHtml(msg.content)}</div>`
     } else if (msg.role === 'assistant') {
-      html += `<div class="a">${escapeHtml(msg.content)}</div>`
+      html += `<div class="a">${renderAnswerHtml(msg.content)}</div>`
       if (msg.sources && msg.sources.length) {
         html += `<p class="src">参考来源：${escapeHtml(uniqSources(msg.sources).map(s => s.title || s).join('、'))}</p>`
       }
@@ -759,6 +735,178 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+function unwrapAnswer(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return ''
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const body = (fenced ? fenced[1] : raw).trim()
+  const tryParse = (value) => {
+    try {
+      const obj = JSON.parse(value)
+      if (obj && typeof obj === 'object' && typeof obj.answer === 'string' && obj.answer.trim()) {
+        return obj.answer.trim()
+      }
+    } catch {
+      return null
+    }
+    return null
+  }
+  const direct = tryParse(body)
+  if (direct) return direct
+  const match = body.match(/\{[\s\S]*?"answer"\s*:[\s\S]*\}/)
+  if (match) {
+    const nested = tryParse(match[0])
+    if (nested) return nested
+  }
+  return raw
+}
+
+function isSourceLocator(text) {
+  const value = String(text || '').trim().replace(/^`|`$/g, '')
+  if (!value) return false
+  if (/\.(md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt|py)\b/i.test(value) || value.includes('monkeycode-tmp-files')) return true
+  if (value.includes(' > ') || /[/\\]/.test(value)) return true
+  return false
+}
+
+function stripLocatorsFromText(text) {
+  let cleaned = String(text || '').replace(/`([^`]+)`/g, (_, inner) => (isSourceLocator(inner) ? '' : `\`${inner}\``))
+  cleaned = cleaned.replace(/(?:\.\.?[/\\])?(?:[\w.+\-]+[/\\])+[\w.+\-]+\.(?:md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt)\b/gi, '')
+  cleaned = cleaned.replace(/[\w.+\-]+\.(?:md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt)\b/gi, '')
+  cleaned = cleaned.replace(/\.monkeycode-tmp-files\/\S+/g, '')
+  cleaned = cleaned.replace(/[（(]\s*[）)]/g, '')
+  cleaned = cleaned.replace(/\s*[-–—|:：]\s*$/g, '')
+  cleaned = cleaned.replace(/^[:：]\s*/g, '')
+  cleaned = cleaned.replace(/(位于|路径|来源|文件)\s*[:：]?\s*$/g, '')
+  return cleaned.replace(/\s{2,}/g, ' ').replace(/^[\s\-—:：]+|[\s\-—:：]+$/g, '')
+}
+
+function isAnswerHeading(line) {
+  const text = String(line || '').trim()
+  if (!text || /^\s*(?:[-*+]|\d+[.)])\s+/.test(text)) return false
+  return /^#{1,6}\s+\S/.test(text) || /^[一二三四五六七八九十百]+、\S/.test(text)
+}
+
+function isDanglingSourceLine(text) {
+  const value = String(text || '').trim()
+  if (!value) return true
+  return /(?:发布前规范文件位于|规范文件位于|文件位于|资料位于|文档位于|位于|路径为|路径是|来源为|来源是)\s*[:：]?\s*$/.test(value)
+}
+
+function stripSourceFiles(text) {
+  const lines = String(text || '').split('\n')
+  const kept = []
+  const listPrefix = /^(\s*(?:[-*+]|\d+[.)])\s+)/
+  for (const line of lines) {
+    const prefixMatch = line.match(listPrefix)
+    if (prefixMatch) {
+      const body = line.slice(prefixMatch[0].length)
+      const colon = body.match(/^([\s\S]*?)[:：]([\s\S]+)$/)
+      if (colon && isSourceLocator(colon[1]) && colon[2].trim() && !isSourceLocator(colon[2])) {
+        kept.push(prefixMatch[0] + colon[2].trim())
+        continue
+      }
+      const stripped = stripLocatorsFromText(body)
+      if (stripped && !isSourceLocator(stripped) && !isDanglingSourceLine(stripped)) kept.push(prefixMatch[0] + stripped)
+      continue
+    }
+    if (/`/.test(line) || /\.(md|markdown|xlsx?|xlsm|csv|tsv|json|docx?|pdf|txt|py)\b/i.test(line) || line.includes('monkeycode-tmp-files')) {
+      const stripped = stripLocatorsFromText(line)
+      if (stripped && !isSourceLocator(stripped) && !isDanglingSourceLine(stripped)) kept.push(stripped)
+      continue
+    }
+    if (isDanglingSourceLine(line)) continue
+    kept.push(line)
+  }
+  const compact = []
+  for (let i = 0; i < kept.length;) {
+    if (isAnswerHeading(kept[i])) {
+      let j = i + 1
+      while (j < kept.length && !kept[j].trim()) j += 1
+      if (j >= kept.length || isAnswerHeading(kept[j])) {
+        i = j
+        continue
+      }
+    }
+    compact.push(kept[i])
+    i += 1
+  }
+  const collapsed = []
+  for (const line of compact) {
+    if (!line.trim() && (!collapsed.length || !collapsed[collapsed.length - 1].trim())) continue
+    collapsed.push(line)
+  }
+  return collapsed.join('\n').trim()
+}
+
+function cleanAnswer(text) {
+  return stripSourceFiles(unwrapAnswer(text))
+}
+
+function formatAnswerHtml(escaped) {
+  const lines = String(escaped || '').split(/\n/)
+  const html = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (/^\s*\|.+\|\s*$/.test(line)) {
+      const rows = []
+      while (i < lines.length && /^\s*\|.+\|\s*$/.test(lines[i])) {
+        const cells = lines[i].split('|').slice(1, -1).map(cell => cell.trim())
+        if (!cells.every(cell => /^:?-{3,}:?$/.test(cell))) rows.push(cells)
+        i += 1
+      }
+      if (rows.length) {
+        html.push('<table class="qa-md-table">')
+        rows.forEach((cells, idx) => {
+          const tag = idx === 0 ? 'th' : 'td'
+          html.push('<tr>' + cells.map(cell => `<${tag}>${cell}</${tag}>`).join('') + '</tr>')
+        })
+        html.push('</table>')
+      }
+      continue
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      html.push('<ul class="qa-md-list">')
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        let item = lines[i].replace(/^\s*[-*]\s+/, '')
+        i += 1
+        while (i < lines.length && lines[i].trim() && !/^\s*(?:[-*]|\d+[\.、])\s+/.test(lines[i]) && !/^\s*\|.+\|\s*$/.test(lines[i])) {
+          item += '<br>' + lines[i].trim()
+          i += 1
+        }
+        html.push(`<li>${item}</li>`)
+        continue
+      }
+      html.push('</ul>')
+      continue
+    }
+    if (/^\s*\d+[\.、]\s+/.test(line)) {
+      html.push('<ol class="qa-md-list">')
+      while (i < lines.length && /^\s*\d+[\.、]\s+/.test(lines[i])) {
+        let item = lines[i].replace(/^\s*\d+[\.、]\s+/, '')
+        i += 1
+        while (i < lines.length && lines[i].trim() && !/^\s*(?:[-*]|\d+[\.、])\s+/.test(lines[i]) && !/^\s*\|.+\|\s*$/.test(lines[i])) {
+          item += '<br>' + lines[i].trim()
+          i += 1
+        }
+        html.push(`<li>${item}</li>`)
+        continue
+      }
+      html.push('</ol>')
+      continue
+    }
+    const withBold = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    if (withBold.trim()) html.push(`<p>${withBold}</p>`)
+    i += 1
+  }
+  return html.join('') || `<p>${escaped}</p>`
+}
+
+function renderAnswerHtml(text) {
+  return formatAnswerHtml(escapeHtml(cleanAnswer(text)))
 }
 
 function downloadFile(content, filename, mime) {
@@ -911,11 +1059,9 @@ function scrollToBottom() {
 
 .qa-home {
   flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  align-items: stretch;
 }
 
 .home-main {
@@ -1027,14 +1173,22 @@ function scrollToBottom() {
 .quick-ask-item:hover { background: #f8fbff; color: #1d4ed8; }
 .quick-ask-item:disabled { cursor: wait; opacity: 0.6; }
 
-.home-side {
+.recent-ask {
+  flex: 1;
+  min-height: 0;
   background: #fff;
-  border: 1px solid #e8eef5;
+  border: 1px solid #efe8dc;
   border-radius: 14px;
-  padding: 14px 16px;
+  padding: 10px 14px 12px;
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+}
+.recent-ask-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 28px;
+  min-height: 0;
+  overflow: auto;
 }
 .side-head {
   display: flex;
@@ -1071,10 +1225,11 @@ function scrollToBottom() {
   .side-item-time { font-size: 12px; color: #94a3b8; }
 
 .selected-tags {
-  padding: 10px 14px;
-  background: #f0f7ff;
-  border-radius: 8px;
-  margin-bottom: 12px;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  margin-bottom: 0;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1104,8 +1259,15 @@ function scrollToBottom() {
   gap: 8px;
   padding: 8px 16px;
   border-bottom: 1px solid #f0f0f0;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
+}
+
+.chat-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .chat-messages {
@@ -1145,6 +1307,39 @@ function scrollToBottom() {
 }
 .message.user .bubble { background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }
 .message.assistant .bubble { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
+
+.bubble-md {
+  white-space: normal;
+}
+.bubble-md p {
+  margin: 0 0 8px;
+}
+.bubble-md p:last-child {
+  margin-bottom: 0;
+}
+.bubble-md .qa-md-list {
+  margin: 4px 0 8px;
+  padding-left: 1.4em;
+}
+.bubble-md .qa-md-list li {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+.bubble-md .qa-md-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.bubble-md .qa-md-table th,
+.bubble-md .qa-md-table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+  text-align: left;
+}
+.bubble-md .qa-md-table th {
+  background: #f8fafc;
+}
 
 .sources {
   margin-top: 8px;

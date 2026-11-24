@@ -183,6 +183,9 @@
           </template>
         </el-table-column>
         <el-table-column label="对话时间" width="160" prop="created_at" />
+        <el-table-column label="耗时" width="100" align="center">
+          <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
+        </el-table-column>
         <el-table-column label="交互形态" width="80" align="center">
           <template #default>文本</template>
         </el-table-column>
@@ -205,10 +208,12 @@
       <div class="pagination">
         <el-pagination
           v-model:current-page="page"
-          :page-size="pageSize"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 30, 50]"
           :total="total"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next"
           @current-change="loadDashboard"
+          @size-change="onPageSizeChange"
         />
       </div>
     </div>
@@ -242,7 +247,7 @@ const chartManualHitRateData = ref([])
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(10)
 const dateRange = ref(null)
 const filterUser = ref('')
 const filterType = ref('')
@@ -317,14 +322,19 @@ function onPeriodChange() {
   loadDashboard()
 }
 
+function onPageSizeChange() {
+  page.value = 1
+  loadDashboard()
+}
+
 function exportData() {
-  let csv = '\uFEFF对话人,对话场域,对话时间,交互形态,用户输入,结果输出,执行结果,检索命中\n'
+  let csv = '\uFEFF对话人,对话场域,对话时间,耗时,交互形态,用户输入,结果输出,执行结果,检索命中\n'
   items.value.forEach(row => {
     const type = row.session_type === 'manual' ? '说明书问答' : '知识库问答'
     const result = row.success ? '成功' : '失败'
     const hit = row.search_hit ? '命中' : '未命中'
     const safe = s => '"' + (s || '').replace(/"/g, '""') + '"'
-    csv += [safe(row.user_name), safe(type), safe(row.created_at), '文本', safe(row.question), safe(row.answer), safe(result), safe(hit)].join(',') + '\n'
+    csv += [safe(row.user_name), safe(type), safe(row.created_at), safe(formatDuration(row.duration_ms)), '文本', safe(row.question), safe(row.answer), safe(result), safe(hit)].join(',') + '\n'
   })
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -339,6 +349,18 @@ function exportData() {
 function formatTime(iso) {
   if (!iso) return ''
   return String(iso).replace('T', ' ').slice(0, 19)
+}
+
+function formatDuration(durationMs) {
+  const ms = Number(durationMs || 0)
+  if (!ms || ms < 0) return '-'
+  const totalSeconds = Math.max(1, Math.round(ms / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}小时${String(minutes).padStart(2, '0')}分${String(seconds).padStart(2, '0')}秒`
+  if (minutes > 0) return `${minutes}分${String(seconds).padStart(2, '0')}秒`
+  return `${seconds}秒`
 }
 
 function sceneEmptyText(scene) {

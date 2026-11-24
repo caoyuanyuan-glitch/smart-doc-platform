@@ -216,6 +216,8 @@ def _ensure_legacy_sqlite_columns():
             stmts.append("ALTER TABLE qa_messages ADD COLUMN search_hit INTEGER DEFAULT 0")
         if 'relevance_score' not in qa_msg_columns:
             stmts.append("ALTER TABLE qa_messages ADD COLUMN relevance_score FLOAT DEFAULT 0.0")
+        if 'duration_ms' not in qa_msg_columns:
+            stmts.append("ALTER TABLE qa_messages ADD COLUMN duration_ms INTEGER DEFAULT 0")
         if stmts:
             with engine.begin() as conn:
                 for s in stmts:

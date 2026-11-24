@@ -200,6 +200,84 @@ def _strip_code_fence(text):
     return text.strip()
 
 
+def detect_source_lang(text: str = "", titles=None) -> str:
+    for title in titles or []:
+        t = title or ""
+        if "_English_" in t or " User Manual" in t or t.endswith("_English") or "System Guide" in t:
+            return "en"
+        if "_中文_" in t or "中文" in t:
+            return "zh"
+    sample = text or ""
+    cn = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    letters = sum(1 for ch in sample if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+    if letters >= 40 and letters >= cn * 3:
+        return "en"
+    return "zh"
+
+
+def build_qa_answer_prompt(question: str, context: str, source_lang: str = "zh") -> str:
+    excerpt = (context or "")[:12000]
+    if source_lang == "en":
+        return f"""Answer the question using ONLY the document excerpts below.
+
+Document excerpts:
+{excerpt}
+
+Question: {question}
+
+Rules:
+1. Use the original English wording from the excerpts. Quote or closely follow the source sentences.
+2. Keep product names, models, parameters, units, and terminology unchanged.
+3. Do not paraphrase into simpler English when the source sentence already answers the question.
+4. The source document is English: write the answer in English, matching the manual.
+5. Inventing facts is forbidden. If the excerpts are unrelated, say the document does not contain this information.
+6. Format the answer as Markdown lists, not a single paragraph:
+   - A short heading line for each topic, for example `Thawing sequencing reagent cartridge 1:`
+   - Numbered lists `1. 2. 3.` for operating steps
+   - Unordered lists `- ` for table rows, models, times, and parameter variants
+   - Blank line between sections
+7. If the page has both "according to steps 1-6" and "the following procedure", put the former under a Tip heading and list only the numbered procedure that follows.
+8. Keep original English wording inside each list item. Split source sentences into list items; do not glue steps or table rows into one block.
+9. Do not list filenames or source paths in the answer.
+10. Answer from this one manual only.
+
+Output a JSON object with no markdown fence:
+{{
+  "answer": "user-facing answer in the source language",
+  "source": "section, table, or paragraph"
+}}
+"""
+    return f"""基于以下文档内容回答问题：
+
+文档内容：
+{excerpt}
+
+问题：{question}
+
+请按照以下要求回答：
+1. 回答必须基于提供的文档内容，禁止编造信息
+2. 只有在文档片段与问题完全无关时才说明"文档中未找到相关信息"；片段中已有操作步骤、注意事项或参数时必须作答
+3. 引用来源写入 source 字段（章节名、表格行或段落位置）
+4. 用说明书原文作答：优先摘录或紧贴原文句子，保留原文用词、句式和数字；不要意译成口语
+5. 严格使用文档中的原始术语和专业词汇，不得自行改写成近义词
+6. 保持文档中的产品名称、型号、参数、单位等专有信息完全不变
+7. 说明书是中文时用中文原文作答；说明书是英文时用英文原文作答，不要把英文手册译成中文
+8. answer 面向用户直接阅读：单条结论直接写；术语对照或表格有多条匹配时，用 Markdown 无序列表列出
+9. 操作步骤、准备流程、开机/实验类问题必须按操作顺序用 Markdown 有序列表完整写出每一步；整理成列表时只改格式，不改原文语义
+10. 当前页同时出现「根据步骤1-6 / 1-7」和「操作步骤如下」时：前者写入「提示」小节，只把「操作步骤如下」之后的编号作为有序列表
+11. 只有「根据步骤1-6」而没有当前页操作步骤、且上下文有步骤1-6正文时，必须展开写入 answer
+12. 不要在 answer 中列出文件名、文件路径或来源清单
+13. 页面有插图、孔位图、试剂体积标注时，文字保留孔位和体积
+14. 只根据当前提供的这一本说明书作答，不要把其他型号的内容混在一起
+
+只输出 JSON 对象本身，不要使用 markdown 代码块包裹：
+{{
+  "answer": "给用户看的正文。操作步骤用有序列表，可含 Markdown，不含文件路径",
+  "source": "引用来源"
+}}
+"""
+
+
 class AIClient:
     def __init__(self):
         self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
@@ -1785,35 +1863,20 @@ class AIClient:
 
         return {"original": text, "polished": result.strip()}
 
-    def qa_answer(self, question, context, request_label="qa.answer"):
-        prompt = f"""
-基于以下文档内容回答问题：
-
-文档内容：
-{context[:8000]}
-
-问题：{question}
-
-请按照以下要求回答：
-1. 回答必须基于提供的文档内容，禁止编造信息
-2. 如果文档中没有相关信息，请明确说明"文档中未找到相关信息"
-3. 回答请附带引用来源（章节名或段落位置）
-4. 严格使用文档中的原始术语和专业词汇，不得自行改写成近义词或口语化表达（例如文档写"主机"则必须用"主机"，不能用"主持人"、"电脑"、"设备"等替代）
-5. 保持文档中的产品名称、型号、参数、单位等专有信息完全不变
-
-请以JSON格式输出：
-{{
-  "answer": "你的回答",
-  "source": "引用来源"
-}}
-"""
+    def qa_answer(self, question, context, request_label="qa.answer", source_lang=None, titles=None):
+        lang = source_lang or detect_source_lang(context, titles)
+        prompt = build_qa_answer_prompt(question, context, lang)
         messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=2048, request_label=request_label)
+        result = self.chat(messages, max_tokens=4096, request_label=request_label)
 
-        try:
-            return json.loads(result)
-        except:
-            return {"answer": result or "文档中未找到相关信息", "source": ""}
+        parsed = self._extract_json(result, None)
+        if isinstance(parsed, dict) and str(parsed.get("answer") or "").strip():
+            return {
+                "answer": str(parsed.get("answer") or "").strip(),
+                "source": str(parsed.get("source") or "").strip(),
+            }
+        cleaned = _strip_code_fence(result or "")
+        return {"answer": cleaned or "文档中未找到相关信息", "source": ""}
 
     def generate_document(self, topic, doc_type, template_text="", requirements=""):
         prompt = f"""

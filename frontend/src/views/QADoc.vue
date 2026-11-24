@@ -3,7 +3,7 @@
     <header class="qa-hero">
       <div>
         <h2 class="page-title">说明书问答</h2>
-        <p class="page-subtitle">直接提问，系统会在华大智造官网定位说明书并作答</p>
+        <p class="page-subtitle">直接提问，系统会打开所选电子说明书库并检索对应手册</p>
       </div>
       <div class="hero-actions">
         <el-button v-if="inChat" class="back-home-btn" @click="backHome">
@@ -14,87 +14,84 @@
     </header>
 
     <div v-if="!inChat" class="qa-home">
-      <section class="ask-panel">
-        <p class="ask-banner">提问后会在华大智造官网定位对应说明书，并按页码引用作答。未命中时可在本会话补传 PDF。</p>
-        <el-input
-          v-model="product"
-          class="product-input"
-          clearable
-          placeholder="型号 / 货号 / 产品名（可选），例如 DNBSEQ-T1+ 或 940-003016-00"
-        />
+      <section class="home-main">
+        <div class="home-ask">
+        <div class="ask-meta">
+          <el-input
+            v-model="product"
+            class="product-input"
+            clearable
+            placeholder="可输入多个型号 / 货号，用逗号分隔，例如 T1+, T7"
+          />
+          <el-radio-group v-model="siteLang" size="small" class="site-switch">
+            <el-radio-button value="zh">中文说明书</el-radio-button>
+            <el-radio-button value="en">英文说明书</el-radio-button>
+          </el-radio-group>
+        </div>
         <div class="chat-input home-input">
           <el-input
             v-model="question"
             type="textarea"
-            :rows="4"
+            :rows="2"
             placeholder="直接输入问题，例如：T1+ 开机前要检查哪些项目？"
             @keydown.enter.exact.prevent="sendQuestion(question)"
           />
           <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
         </div>
-        <div class="example-block">
-          <div class="example-head">常见问法</div>
-          <button
-            v-for="ex in examples"
-            :key="ex.query"
-            class="example-row"
-            type="button"
-            :disabled="loading"
-            @click="sendQuestion(ex.query)"
-          >
-            <span class="example-row-title">{{ ex.label }}</span>
-            <span class="example-row-query">{{ ex.query }}</span>
-          </button>
+        </div>
+
+        <div class="recent-ask">
+          <div class="side-head">
+            <span>最近问答</span>
+            <el-button v-if="sessionList.length" size="small" text @click="historyVisible = true">全部</el-button>
+          </div>
+          <div v-if="!sessionList.length" class="side-empty">提问后，会话会显示在这里</div>
+          <div v-else class="recent-ask-list">
+            <button
+              v-for="s in sessionList.slice(0, 8)"
+              :key="s.id"
+              class="side-item"
+              type="button"
+              @click="loadSession(s.id)"
+            >
+              <span class="side-item-title">{{ s.title }}</span>
+              <span class="side-item-time">{{ formatTime(s.updated_at) }}</span>
+            </button>
+          </div>
         </div>
       </section>
-      <aside class="home-side">
-        <div class="side-head">
-          <span>最近问答</span>
-          <el-button v-if="sessionList.length" size="small" text @click="historyVisible = true">全部</el-button>
-        </div>
-        <div v-if="!sessionList.length" class="side-empty">提问后，会话会显示在这里</div>
-        <button
-          v-for="s in sessionList.slice(0, 8)"
-          :key="s.id"
-          class="side-item"
-          type="button"
-          @click="loadSession(s.id)"
-        >
-          <span class="side-item-title">{{ s.title }}</span>
-          <span class="side-item-time">{{ formatTime(s.updated_at) }}</span>
-        </button>
-      </aside>
     </div>
 
     <section v-else class="chat-panel">
       <div class="chat-toolbar">
-        <el-button size="small" text @click="backHome"><el-icon><Plus /></el-icon> 新建会话</el-button>
-        <el-button size="small" text @click="copyAll" :disabled="messages.length <= 1"><el-icon><CopyDocument /></el-icon> 复制全文</el-button>
-        <el-dropdown @command="handleExport">
-          <el-button size="small" text :disabled="messages.length <= 1">
-            <el-icon><Download /></el-icon> 导出
-            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
-              <el-dropdown-item command="word">Word (.doc)</el-dropdown-item>
-              <el-dropdown-item command="pdf">PDF (.pdf)</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
-
-      <div class="chat-messages" ref="chatBox">
         <div class="selected-tags">
           <span class="selected-tags-label">本次依据：</span>
           <template v-if="currentTitles.length">
             <el-tag v-for="t in currentTitles" :key="t" size="small">{{ t }}</el-tag>
             <el-button v-if="candidates.length > 1" size="small" text type="primary" @click="switchVisible = true">更换</el-button>
           </template>
-          <span v-else class="scope-hint">{{ loading ? '正在官网检索' : '尚未定位说明书' }}</span>
+          <span v-else class="scope-hint">{{ loading ? '正在说明书库检索' : '尚未定位说明书' }}</span>
         </div>
+        <div class="chat-toolbar-actions">
+          <el-button size="small" text @click="backHome"><el-icon><Plus /></el-icon> 新建会话</el-button>
+          <el-button size="small" text @click="copyAll" :disabled="messages.length <= 1"><el-icon><CopyDocument /></el-icon> 复制全文</el-button>
+          <el-dropdown @command="handleExport">
+            <el-button size="small" text :disabled="messages.length <= 1">
+              <el-icon><Download /></el-icon> 导出
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
+                <el-dropdown-item command="word">Word (.doc)</el-dropdown-item>
+                <el-dropdown-item command="pdf">PDF (.pdf)</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+      </div>
 
+      <div class="chat-messages" ref="chatBox">
         <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
           <div class="avatar" :class="msg.role">
             <el-icon v-if="msg.role === 'user'"><User /></el-icon>
@@ -111,7 +108,8 @@
             </el-icon>
           </div>
           <div class="bubble-wrap">
-            <div class="bubble">{{ msg.content }}</div>
+            <div v-if="msg.role === 'assistant'" class="bubble bubble-md" v-html="renderAnswerHtml(msg.content)"></div>
+            <div v-else class="bubble">{{ msg.content }}</div>
             <div v-if="msg.sources && msg.sources.length" class="sources">
               <div class="sources-title">信息来源：</div>
               <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="source-item">
@@ -155,9 +153,15 @@
         </div>
       </div>
 
-      <div class="chat-input">
-        <el-input v-model="question" type="textarea" :rows="2" placeholder="继续追问，或换一个型号再问" @keydown.enter.exact.prevent="sendQuestion(question)" />
-        <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
+      <div class="chat-composer">
+        <el-radio-group v-model="siteLang" size="small" class="site-switch">
+          <el-radio-button value="zh">中文说明书</el-radio-button>
+          <el-radio-button value="en">英文说明书</el-radio-button>
+        </el-radio-group>
+        <div class="chat-input">
+          <el-input v-model="question" type="textarea" :rows="2" placeholder="继续追问，或换一个型号再问" @keydown.enter.exact.prevent="sendQuestion(question)" />
+          <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
+        </div>
       </div>
     </section>
 
@@ -175,8 +179,8 @@
 
     <el-dialog v-model="switchVisible" :title="currentTitles.length ? '更换说明书' : '请选择说明书'" width="640px">
       <div class="candidate-list">
-        <label v-for="c in candidates" :key="c.official_id" class="candidate-item" :class="{ active: pickedOfficialId === c.official_id }">
-          <input type="radio" :value="c.official_id" v-model="pickedOfficialId" />
+        <label v-for="c in candidates" :key="c.official_id" class="candidate-item" :class="{ active: pickedOfficialIds.includes(c.official_id) }">
+          <input type="checkbox" :value="c.official_id" v-model="pickedOfficialIds" />
           <div>
             <div class="candidate-title">{{ c.title }}</div>
             <div class="candidate-meta">版本 {{ c.docuversion || '-' }} · {{ c.create_time || '-' }} · {{ c.size || '-' }}</div>
@@ -185,7 +189,7 @@
       </div>
       <template #footer>
         <el-button @click="switchVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!pickedOfficialId" @click="confirmSwitch">{{ currentTitles.length ? '用这本重新作答' : '用这本作答' }}</el-button>
+        <el-button type="primary" :disabled="!pickedOfficialIds.length" @click="confirmSwitch">{{ currentTitles.length ? '用所选重新作答' : '用所选说明书作答' }}</el-button>
       </template>
     </el-dialog>
 
@@ -222,19 +226,82 @@ import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowLeft, CopyDocument, Download, Loading, Plus, User } from '@element-plus/icons-vue'
 import { manualAPI, qaAPI } from '@/api/index.js'
 
-const examples = [
-  { label: 'T1+ 开机流程', query: 'T1+ 系统操作指南里的开机流程是什么' },
-  { label: 'MGISP-100 移液范围', query: 'MGISP-100 的移液范围是多少' },
-  { label: 'OmicsNest 分析模块', query: 'OmicsNest 支持哪些分析模块' },
-]
-
 function formatTime(iso) {
   if (!iso) return ''
   return String(iso).replace('T', ' ').slice(0, 16)
 }
-const loadingStages = ['正在官网检索说明书...', '已定位目标手册...', '正在解析 PDF...', '正在作答...']
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function formatAnswerHtml(escaped) {
+  const lines = String(escaped || '').split(/\n/)
+  const html = []
+  let i = 0
+  const listItem = /^\s*(?:[-*]|\d+[\.、])\s+/
+  const orderedItem = /^\s*\d+[\.、]\s+/
+  const bulletItem = /^\s*[-*]\s+/
+  while (i < lines.length) {
+    const line = lines[i]
+    if (/^\s*#{1,3}\s+/.test(line)) {
+      const hashes = line.trim().match(/^#+/)[0]
+      const level = Math.min(hashes.length + 1, 4)
+      const text = line.replace(/^\s*#{1,3}\s+/, '').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      html.push(`<h${level} class="qa-md-h">${text}</h${level}>`)
+      i += 1
+      continue
+    }
+    if (/^\s*\|.+\|\s*$/.test(line)) {
+      const rows = []
+      while (i < lines.length && /^\s*\|.+\|\s*$/.test(lines[i])) {
+        const cells = lines[i].split('|').slice(1, -1).map(cell => cell.trim())
+        if (!cells.every(cell => /^:?-{3,}:?$/.test(cell))) rows.push(cells)
+        i += 1
+      }
+      if (rows.length) {
+        html.push('<table class="qa-md-table">')
+        rows.forEach((cells, idx) => {
+          const tag = idx === 0 ? 'th' : 'td'
+          html.push('<tr>' + cells.map(cell => `<${tag}>${cell}</${tag}>`).join('') + '</tr>')
+        })
+        html.push('</table>')
+      }
+      continue
+    }
+    if (orderedItem.test(line) || bulletItem.test(line)) {
+      const ordered = orderedItem.test(line)
+      html.push(ordered ? '<ol class="qa-md-list">' : '<ul class="qa-md-list">')
+      while (i < lines.length && (ordered ? orderedItem.test(lines[i]) : bulletItem.test(lines[i]))) {
+        let item = lines[i].replace(listItem, '')
+        i += 1
+        while (i < lines.length && lines[i].trim() && !listItem.test(lines[i]) && !/^\s*\|.+\|\s*$/.test(lines[i])) {
+          item += '<br>' + lines[i].trim()
+          i += 1
+        }
+        html.push(`<li>${item.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</li>`)
+      }
+      html.push(ordered ? '</ol>' : '</ul>')
+      continue
+    }
+    const withBold = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    if (withBold.trim()) html.push(`<p>${withBold}</p>`)
+    i += 1
+  }
+  return html.join('') || `<p>${escaped}</p>`
+}
+
+function renderAnswerHtml(text) {
+  return formatAnswerHtml(escapeHtml(text))
+}
+const loadingStages = ['正在电子说明书库检索...', '已定位目标手册...', '正在解析 PDF...', '正在作答...']
 
 const product = ref('')
+const siteLang = ref('zh')
 const question = ref('')
 const loading = ref(false)
 const loadingText = ref(loadingStages[0])
@@ -254,7 +321,7 @@ const currentFeedbackQuestion = ref('')
 const currentFeedbackAnswer = ref('')
 const currentFeedbackIndex = ref(-1)
 const switchVisible = ref(false)
-const pickedOfficialId = ref(null)
+const pickedOfficialIds = ref([])
 const historyVisible = ref(false)
 const previewVisible = ref(false)
 const previewUrl = ref('')
@@ -269,7 +336,10 @@ let previewTimer = null
 
 const officialUrl = computed(() => {
   const hit = candidates.value.find(c => currentTitles.value.includes(c.title))
-  return hit?.official_url || ''
+  if (hit?.library_url) return hit.library_url
+  return siteLang.value === 'en'
+    ? 'https://global-mgitech.com/resources/manual-library/'
+    : 'https://mgi-tech.com/manual'
 })
 
 function startLoadingStages() {
@@ -320,15 +390,17 @@ async function sendQuestion(text, extra = {}) {
       session_id: sessionId.value,
       official_ids: extra.official_ids || undefined,
       file_ids: extra.file_ids || undefined,
+      site: siteLang.value,
     })
     const data = resp.data || {}
     sessionId.value = data.session_id
+    if (data.site === 'en' || data.site === 'zh') siteLang.value = data.site
     currentTitles.value = data.titles || (data.selected || []).map(s => s.title)
     currentTitle.value = currentTitles.value[0] || q.slice(0, 40)
     candidates.value = data.candidates || []
-    pickedOfficialId.value = (data.selected && data.selected[0] && data.selected[0].official_id) || pickedOfficialId.value
+    pickedOfficialIds.value = (data.selected || []).map(s => s.official_id).filter(Boolean)
     if (data.status === 'choose') {
-      pickedOfficialId.value = data.candidates?.[0]?.official_id || pickedOfficialId.value
+      pickedOfficialIds.value = (data.selected || []).map(s => s.official_id).filter(Boolean)
       switchVisible.value = true
     }
     messages.value.push({
@@ -371,8 +443,8 @@ async function onMissFile(file) {
 
 async function confirmSwitch() {
   switchVisible.value = false
-  if (!pickedOfficialId.value) return
-  await sendQuestion(lastUserQuestion.value, { official_ids: [pickedOfficialId.value] })
+  if (!pickedOfficialIds.value.length) return
+  await sendQuestion(lastUserQuestion.value, { official_ids: pickedOfficialIds.value })
 }
 
 function backHome() {
@@ -517,12 +589,6 @@ function copyAll() {
   navigator.clipboard.writeText(t).then(() => ElMessage.success('已复制'))
 }
 
-function escapeHtml(s) {
-  const d = document.createElement('div')
-  d.textContent = s
-  return d.innerHTML
-}
-
 function buildHtml() {
   let h = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>说明书问答</title></head><body><h1>' + escapeHtml(currentTitle.value) + '</h1>'
   messages.value.forEach(m => {
@@ -554,74 +620,41 @@ onBeforeUnmount(() => { stopLoadingStages(); resetPreview() })
 </script>
 
 <style scoped>
-.qa-container { padding: 0; }
-.qa-hero { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 22px; }
+.qa-container {
+  padding: 0;
+  min-height: calc(100vh - 108px);
+  display: flex;
+  flex-direction: column;
+}
+.qa-hero { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 14px; }
 .page-title { font-size: 26px; font-weight: 650; color: #111827; margin: 0 0 6px; }
 .page-subtitle { margin: 0; color: #6b7280; font-size: 14px; line-height: 1.6; }
 .hero-actions { display: flex; gap: 8px; }
 .back-home-btn { height: 36px; padding: 0 14px; border: 1px solid #d7dee8; background: #fff; color: #334155; border-radius: 8px; }
 .back-home-btn:hover, .back-home-btn:focus { border-color: #93c5fd; color: #1d4ed8; background: #f8fbff; }
 .qa-home {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 20px;
-  min-height: calc(100vh - 176px);
-  align-items: stretch;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
-.ask-panel {
+.home-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.recent-ask {
   background: #fff;
   border: 1px solid #efe8dc;
-  border-radius: 16px;
-  padding: 22px;
+  border-radius: 14px;
+  padding: 10px 14px 12px;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 8px 20px rgba(28, 25, 23, 0.04);
 }
-.ask-banner {
-  margin: 0 0 18px;
-  padding: 12px 14px;
-  background: #fffaf3;
-  border: 1px solid #efe4d4;
-  border-radius: 10px;
-  color: #57534e;
-  font-size: 13px;
-  line-height: 1.65;
-}
-.example-block {
-  margin-top: 18px;
-  flex: 1;
-  border-top: 1px solid #f1f5f9;
-  padding-top: 8px;
-}
-.example-head {
-  font-size: 12px;
-  color: #94a3b8;
-  padding: 8px 4px;
-}
-.example-row {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  text-align: left;
-  border: 0;
-  border-bottom: 1px solid #f1f5f9;
-  background: transparent;
-  padding: 14px 8px;
-  cursor: pointer;
-}
-.example-row:hover { background: #f8fbff; }
-.example-row-title { font-size: 14px; font-weight: 600; color: #1e293b; }
-.example-row-query { font-size: 12px; color: #94a3b8; }
-.home-side {
-  background: #fff;
-  border: 1px solid #e8eef5;
-  border-radius: 16px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  min-height: 100%;
+.recent-ask-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 28px;
 }
 .side-head {
   display: flex;
@@ -632,7 +665,7 @@ onBeforeUnmount(() => { stopLoadingStages(); resetPreview() })
   color: #1e293b;
   margin-bottom: 8px;
 }
-.side-empty { color: #94a3b8; font-size: 13px; padding: 24px 4px; line-height: 1.6; }
+.side-empty { color: #94a3b8; font-size: 13px; padding: 8px 4px; line-height: 1.6; }
 .side-item {
   width: 100%;
   display: flex;
@@ -656,8 +689,45 @@ onBeforeUnmount(() => { stopLoadingStages(); resetPreview() })
   max-width: 100%;
 }
 .side-item-time { font-size: 12px; color: #94a3b8; }
-.product-input { margin-bottom: 10px; }
-.chat-input { display: flex; gap: 10px; align-items: flex-end; }
+.home-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ask-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ask-meta .product-input {
+  flex: 1;
+  min-width: 240px;
+}
+.site-switch :deep(.el-radio-button__inner) {
+  padding: 7px 12px;
+}
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 0;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+}
+.chat-composer .chat-input {
+  border-top: 0;
+  padding: 0 0 16px;
+}
+.product-input { margin-bottom: 0; }
+.chat-input {
+  display: flex;
+  gap: 10px;
+  padding: 16px;
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+  align-items: flex-end;
+}
 .home-input {
   border: 1px solid #e7e0d6;
   border-radius: 14px;
@@ -667,20 +737,91 @@ onBeforeUnmount(() => { stopLoadingStages(); resetPreview() })
 }
 .chat-input .el-textarea { flex: 1; }
 .chat-panel { background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); display: flex; flex-direction: column; overflow: hidden; }
-.chat-toolbar { display: flex; gap: 8px; padding: 8px 16px; border-bottom: 1px solid #f0f0f0; justify-content: flex-end; }
+.chat-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  justify-content: space-between;
+  align-items: center;
+}
+.chat-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
 .chat-messages { flex: 1; padding: 20px; overflow-y: auto; background: #f8fafc; min-height: 420px; max-height: calc(100vh - 300px); }
-.selected-tags { padding: 10px 14px; background: #f0f7ff; border-radius: 8px; margin-bottom: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.selected-tags {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  margin-bottom: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
 .selected-tags-label { font-size: 12px; color: #6b7280; font-weight: 500; }
-.scope-hint { font-size: 12px; color: #2563eb; }
+.scope-hint {
+  font-size: 12px;
+  color: #2563eb;
+  background: #eff6ff;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
 .message { display: flex; margin-bottom: 20px; gap: 10px; }
 .message.user { flex-direction: row-reverse; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0; }
 .avatar.user { background: #3b82f6; }
 .avatar.assistant { background: #409EFF; }
 .bubble-wrap { max-width: 74%; }
+.message.assistant .bubble-wrap { max-width: 86%; }
 .bubble { padding: 12px 16px; border-radius: 12px; line-height: 1.7; color: #374151; font-size: 14px; white-space: pre-wrap; }
 .message.user .bubble { background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }
 .message.assistant .bubble { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
+.bubble-md {
+  white-space: normal;
+}
+.bubble-md p {
+  margin: 0 0 10px;
+}
+.bubble-md p:last-child {
+  margin-bottom: 0;
+}
+.bubble-md .qa-md-h {
+  margin: 12px 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1e293b;
+}
+.bubble-md .qa-md-list {
+  margin: 4px 0 8px;
+  padding-left: 1.4em;
+}
+.bubble-md ol.qa-md-list {
+  list-style: decimal;
+}
+.bubble-md .qa-md-list li {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+.bubble-md .qa-md-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.bubble-md .qa-md-table th,
+.bubble-md .qa-md-table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+  text-align: left;
+}
+.bubble-md .qa-md-table th {
+  background: #f8fafc;
+}
 .sources { margin-top: 8px; padding: 10px 12px; background: #f1f5f9; border-radius: 8px; font-size: 12px; }
 .sources-title { color: #64748b; margin-bottom: 4px; font-weight: 500; }
 .source-item { color: #475569; padding: 4px 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -719,7 +860,7 @@ onBeforeUnmount(() => { stopLoadingStages(); resetPreview() })
 .preview-frame { width: 100%; height: calc(100vh - 120px); border: 0; opacity: 0; }
 .preview-frame.is-ready { opacity: 1; }
 @media (max-width: 980px) {
-  .qa-home { grid-template-columns: 1fr; }
+  .recent-ask-list { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
   .qa-hero { align-items: flex-start; flex-direction: column; }
