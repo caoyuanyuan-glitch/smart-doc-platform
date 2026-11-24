@@ -6,8 +6,9 @@
 2. 每条规则必须在真实 goldset（T7 R01 41 条人工批注）上验证过，
    且全文扫描确认误报面可控后才收录。
 
-覆盖 5 类（对应 T7 R01 goldset 漏报 #3/#4/#6/#10/#15/#33）：
+覆盖 6 类（对应 T7 R01 goldset 漏报 #3/#4/#6/#10/#15/#33；T7RS R02 #15/#16）：
 - DET-CN-UNITSPACE   数字与摄氏度紧贴（多数写法带空格时）
+- DET-CN-UNITTRUNC   行尾「数值 + m」缺 L（同数值同族多数为 mL 时）
 - DET-CN-CATNO-FMT   货号格式偏离多数（如 940-00317100 缺尾段，多数为 940-XXXXXX-XX）
 - DET-CN-REDUNDANT   「超过…以上」语义重复
 - DET-CN-PUNCT-CLUSTER 冒号后紧跟逗号（如「处理：，以下」）
@@ -89,6 +90,65 @@ _COLON_COMMA_RE = re.compile(r"[：:]\s*[，,]")
 
 # 行首标点（避头尾）；缩进含全角空格。
 _LINE_LEAD_PUNCT_RE = re.compile(r"(?m)^[ \t\u3000]*[，。；、]")
+
+# 单位被截断（缺 L）：行尾「数值 + m」。
+# T7RS R02 Tina #15/#16（p180/p181）：P5 行「引物工作液1.8 m」，
+# 同组 P1–P4 均为「引物工作液1.8 mL」——不是「缺空格」，是少了 L。
+# 双重守卫：① 行尾（排除「离设备外壳 1 m 具有…」这类合法的「米」）；
+# ② 同数值在全文有 ≥2 处 mL 形态、且至少 1 处与候选行前缀末尾 3 个汉字同族。
+_TRUNCATED_ML_RE = re.compile(r"(?P<num>\d+(?:\.\d+)?)[ \t]*m[ \t]*[。．]?[ \t]*$")
+_CORRECT_ML_RE = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*(?:mL|µL|μL)(?![A-Za-z])")
+
+
+def _cjk_tail(prefix: str, n: int = 3) -> str:
+    """取前缀末尾至多 n 个汉字，用于判定候选行与正确形态行是否同族。
+
+    至少 2 个汉字才返回（单字前缀区分度不足，宁可不报）；不足 n 个时
+    返回实际汉字数（如「试剂」→「试剂」），避免短前缀文档整类漏报。
+    """
+    cjk = re.findall(r"[\u4e00-\u9fff]", prefix)
+    return "".join(cjk[-n:]) if len(cjk) >= 2 else ""
+
+
+def check_truncated_ml_unit(text: str, *, parsed: bool = True) -> list[dict]:
+    """行尾「数值 + m」疑似 mL 缺 L 时上报（DET-CN-UNITTRUNC）。
+
+    只报可验证的确定性事实：全文同数值已确立 mL 多数写法，且存在同族行；
+    不推断该单位一定是 mL（描述用「疑似」、建议人工核对），避免把
+    「距离为 1.8 m」这类合法长度单位误判为缺字。
+    """
+    source = str(text or "")
+    if not parsed or not source.strip():
+        return []
+    lines = source.splitlines(keepends=True)
+    # 全文正确形态：数值 -> 该行前缀末尾汉字元组列表
+    correct: dict[str, list[str]] = {}
+    for line in lines:
+        for m in _CORRECT_ML_RE.finditer(line):
+            correct.setdefault(m.group("num"), []).append(_cjk_tail(line[:m.start()]))
+    issues: list[dict] = []
+    offset = 0
+    for line in lines:
+        body = line.rstrip("\r\n")
+        for m in _TRUNCATED_ML_RE.finditer(body):
+            num = m.group("num")
+            family = correct.get(num, [])
+            if len(family) < 2:
+                continue  # 该数值未在全文确立 mL 多数形态，不下结论
+            tail = _cjk_tail(body[:m.start("num")])
+            if not tail or not any(t == tail for t in family):
+                continue  # 与 mL 行不同族（如「离设备外壳 1 m」是米）
+            start, end = offset + m.start(), offset + m.end()
+            issues.append(_issue(
+                source, start, end, m.group(0).strip(), "DET-CN-UNITTRUNC", "数值与单位写法",
+                f"行尾「{num} m」疑似单位截断（缺 L）：全文 {len(family)} 处同数值写作「{num} mL」，"
+                "且存在同族行（相同前缀）使用完整单位。",
+                f"建议核对是否应为「{num} mL」（补 L）；若为长度单位 m 请忽略。",
+                confidence=85,
+                basis="中文技术文档写作规范 - 单位完整性（同族多数写法锚定）",
+            ))
+        offset += len(line)
+    return issues
 
 
 def check_tight_degree_unit(text: str, *, parsed: bool = True) -> list[dict]:
@@ -218,6 +278,7 @@ def check_cn_format_consistency(text: str, *, parsed: bool = True) -> list[dict]
     issues: list[dict] = []
     for fn in (
         check_tight_degree_unit,
+        check_truncated_ml_unit,
         check_catalog_number_format,
         check_redundant_over_above,
         check_colon_comma,

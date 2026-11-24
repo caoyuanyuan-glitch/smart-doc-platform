@@ -14037,6 +14037,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         except Exception as e:
                             print(f"[审核] PDF 渲染层字符间距规则执行失败: {e}")
                         try:
+                            from app.review_engine.pdf_clipped_unit import detect_clipped_unit_chars
+                            clipped_issues = detect_clipped_unit_chars(_get_document_upload_path(document))
+                            if clipped_issues:
+                                print(f"[审核] PDF 渲染层字符裁剪(单位缺L)发现问题: {len(clipped_issues)}个")
+                                rule_issues.extend(clipped_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 渲染层字符裁剪规则执行失败: {e}")
+                        try:
                             from app.review_engine.pdf_table_continuity import check_pdf_table_continuity
                             table_cont_issues = check_pdf_table_continuity(_get_document_upload_path(document))
                             if table_cont_issues:
