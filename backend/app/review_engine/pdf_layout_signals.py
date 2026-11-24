@@ -71,6 +71,51 @@ def _image_offset_ratio(page) -> float:
     return round(best, 4)
 
 
+def _column_overflow(page) -> int:
+    """表格单元格文字越过真实列分隔竖线的词数（列宽不足的几何信号）。
+
+    判定依据是页面矢量竖线而非 find_tables 的单元格 bbox：合并单元格的
+    文字天然横跨多个子格，不能算出界；只有越过真实绘制的列分隔线才算。
+    """
+    try:
+        tables = page.find_tables().tables
+    except Exception:
+        return 0
+    if not tables:
+        return 0
+    try:
+        words = page.get_text("words") or []
+    except Exception:
+        return 0
+    overflow = 0
+    for table in tables:
+        bbox = table.bbox
+        bx0, by0, bx1, by1 = bbox
+        vxs = set()
+        for drawing in page.get_drawings() or []:
+            r = drawing["rect"]
+            if r.x0 < bx0 - 5 or r.x1 > bx1 + 5 or r.y1 < by0 or r.y0 > by1:
+                continue
+            w = r.x1 - r.x0
+            h = r.y1 - r.y0
+            if h > 5 and w < 2.5:
+                vxs.add(round(r.x0))
+            elif h > 5 and w <= 6:
+                vxs.add(round(r.x0))
+                vxs.add(round(r.x1))
+        if not vxs:
+            continue
+        for word in words:
+            wx0, wy0, wx1, _wy1, _text = word[0], word[1], word[2], word[3], word[4]
+            if not (by0 - 2 <= wy0 and _wy1 <= by1 + 2):
+                continue
+            crossed = [x for x in vxs if wx0 < x - 1 < wx1 - 3]
+            if crossed:
+                overflow += 1
+                break
+    return overflow
+
+
 def collect_page_layout_signals(page) -> dict:
     gaps = _line_gaps(page)
     widths = _drawing_widths(page)
@@ -87,6 +132,7 @@ def collect_page_layout_signals(page) -> dict:
         "line_gap_median": round(median_gap, 2),
         "crowding_score": round(crowding, 4),
         "image_offset_ratio": _image_offset_ratio(page),
+        "column_overflow_count": _column_overflow(page),
     }
 
 
@@ -120,6 +166,7 @@ def layout_candidate_score(candidate: dict) -> tuple:
         float(signals.get("crowding_score") or 0.0),
         float(signals.get("thick_line_ratio") or 0.0),
         float(signals.get("image_offset_ratio") or 0.0),
+        int(signals.get("column_overflow_count") or 0),
         len(candidate.get("reasons") or []),
         -int(candidate.get("page_number") or 0),
     )

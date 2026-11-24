@@ -2567,6 +2567,15 @@ class AIClient:
             print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
             _prompt_builder_fallback_logged = True
 
+        # few-shot 审校判例：真实人工批注校准问题报告颗粒度（失败静默跳过，不阻断审核）
+        fewshot_block = ""
+        try:
+            from app.review_engine.fewshot_corpus import build_fewshot_block
+
+            fewshot_block = build_fewshot_block(content, lang)
+        except Exception as e:
+            print(f"[ai_client] few-shot 判例加载失败，跳过注入: {e}")
+
         if is_english:
             context_block = f"\n\n{base_system_prompt}" if base_system_prompt.strip() else ""
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
@@ -2620,7 +2629,7 @@ ADJUDICATION PROTOCOL (run before finalizing the severity of ANY issue):
 3. Before claiming a component is leftover from another model, verify functional equivalence: search the literal name first, then search for functionally equivalent or correspondingly named parts and compare their technical parameters; report "naming inconsistency" if an equivalent part exists, and only claim leftover when none does.
 4. For drafts under review: placeholder dates like "YYYY 年 MM 月 xx 日" in revision history and revision highlights/annotations are normal submission markers — do not report "unfinalized placeholder" or "revision marks not cleared", and do not downgrade release-readiness because of them.
 5. The expected field must be backed by the excerpt or an explicit rule. When no evidence-backed correction exists, describe the doubt and set needs_human_review=true; never invent content absent from the excerpt (e.g. a power value or a missing step guessed from common sense).
-
+{fewshot_block}
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
 - Do not rewrite text only for readability, tone, or style. Report only objective violations from the checklist or common-error rules.
@@ -2753,7 +2762,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 3. 判定"部件为其他机型残留"前必须验证功能等价性：先检索字面写法，再检索功能等价部件并比对参数；有等价部件改报"命名不统一"。
 4. 过程稿/送审稿：版本记录日期"YYYY 年 MM 月 xx 日"、改动处高亮与批注属送审常态，不报"未定稿占位符"与"修改痕迹未清除"。
 5. expected 必须有原文或规则依据；无法给出有依据的写法时，只描述问题并置 needs_human_review=true，禁止凭空建议补充原文没有的内容。
-
+{fewshot_block}
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
