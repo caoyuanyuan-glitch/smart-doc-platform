@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 from collections import Counter
 from typing import Any
 
@@ -898,19 +899,24 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
 
 
 _PIPELINE_DROP_COUNTER: Counter = Counter()
+# 并发安全：FastAPI 多协程/线程会并发审核多个文档，全局 Counter 的 += 与
+# 取出清空必须原子化，否则归因计数会串到别的 review（工程债治理，不改判噪逻辑）。
+_PIPELINE_DROP_LOCK = threading.Lock()
 
 
 def drain_pipeline_drop_reasons() -> dict[str, int]:
     """取出并清空内存中的丢弃归因计数，供审核 summary 汇总（不依赖 REVIEW_DROP_LOG 文件）。"""
     global _PIPELINE_DROP_COUNTER
-    reasons = dict(_PIPELINE_DROP_COUNTER)
-    _PIPELINE_DROP_COUNTER = Counter()
+    with _PIPELINE_DROP_LOCK:
+        reasons = dict(_PIPELINE_DROP_COUNTER)
+        _PIPELINE_DROP_COUNTER = Counter()
     return reasons
 
 
 def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
     """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
-    _PIPELINE_DROP_COUNTER[reason] += 1
+    with _PIPELINE_DROP_LOCK:
+        _PIPELINE_DROP_COUNTER[reason] += 1
     path = os.getenv("REVIEW_DROP_LOG", "")
     if not path:
         return
@@ -938,28 +944,37 @@ def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, thresh
 def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> list[Any]:
     counters: Counter = Counter()
     selected_by_key: dict[str, Any] = {}
-    drop_reasons: Counter = Counter()
+    downgraded: list[Any] = []
+    # 能力3（opt-in）：整类/阈值静默 drop 改为降权保留，默认关，零回归。
+    try:
+        from app.review_engine.accuracy_upgrades import downgrade_instead_of_drop
+    except ImportError:
+        downgrade_instead_of_drop = None
+
+    def _drop_or_downgrade(reason, issue, **log_kwargs):
+        _log_pipeline_drop(reason, issue, **log_kwargs)
+        if downgrade_instead_of_drop is not None:
+            kept = downgrade_instead_of_drop(issue, reason)
+            if kept is not None:
+                downgraded.append(kept)
+
     for raw_issue in issues or []:
         issue = normalize_issue(raw_issue)
         data = issue_to_mapping(issue)
         status = str(data["status"] or "").lower()
         if status_filter and status not in {"", "pending", "confirmed", "converted_to_rule"}:
-            _log_pipeline_drop("status_filtered", issue)
-            drop_reasons["status_filtered"] += 1
+            _drop_or_downgrade("status_filtered", issue)
             continue
         if not data["original_text"]:
-            _log_pipeline_drop("empty_original_text", issue)
-            drop_reasons["empty_original_text"] += 1
+            _drop_or_downgrade("empty_original_text", issue)
             continue
         if is_noise(issue, counters):
-            _log_pipeline_drop("noise", issue)
-            drop_reasons["noise"] += 1
+            _drop_or_downgrade("noise", issue)
             continue
         threshold = 38 if str(data["severity"] or "").lower() in {"fatal", "serious"} else min_score
         score = value_score(issue)
         if score < threshold:
-            _log_pipeline_drop("below_threshold", issue, score=score, threshold=threshold)
-            drop_reasons["below_threshold"] += 1
+            _drop_or_downgrade("below_threshold", issue, score=score, threshold=threshold)
             continue
         key = dedupe_key(issue)
         existing = selected_by_key.get(key)
@@ -973,7 +988,9 @@ def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: 
             drop_reasons["dedupe_shadowed"] += 1
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
-    return sorted(selected, key=sort_key)
+    # 降权项排在高置信结果之后，且仍按 sort_key 内部排序。
+    downgraded.sort(key=sort_key)
+    return sorted(selected, key=sort_key) + downgraded
 
 
 def select_review_issues_with_diagnostics(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> tuple[list[Any], dict[str, Any]]:
