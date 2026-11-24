@@ -1,9 +1,16 @@
 <template>
-  <div class="agent-dock" v-if="isAuthenticated">
+  <div
+    class="agent-dock"
+    v-if="isAuthenticated"
+    ref="dockRef"
+    :class="{ dragging }"
+    :style="dockStyle"
+  >
     <transition name="agent-panel">
-      <section class="agent-panel" v-show="open" aria-label="智能助手">
-        <header class="agent-header">
+      <section class="agent-panel" v-show="open" :style="panelStyle" aria-label="智能助手">
+        <header class="agent-header" @pointerdown="onHeaderPointerDown">
           <div class="agent-title">
+            <span class="agent-drag-grip" aria-hidden="true"></span>
             <span class="agent-title-dot"></span>
             <span>智能助手</span>
             <span class="agent-title-sub">一句话调用平台功能</span>
@@ -24,14 +31,6 @@
           <div v-if="messages.length === 0" class="agent-welcome">
             <p class="agent-welcome-title">你好，我是平台智能助手</p>
             <p class="agent-welcome-desc">告诉我你想做什么，我帮你调用对应模块，或带你到对应页面。</p>
-            <div class="agent-chips">
-              <button
-                v-for="c in quickPrompts"
-                :key="c"
-                class="agent-chip"
-                @click="sendText(c)"
-              >{{ c }}</button>
-            </div>
           </div>
 
           <div v-for="(msg, idx) in messages" :key="idx" class="agent-msg" :class="msg.role">
@@ -111,6 +110,15 @@
         </div>
 
         <footer class="agent-footer">
+          <div class="agent-chips">
+            <button
+              v-for="c in quickPrompts"
+              :key="c.label"
+              class="agent-chip"
+              :disabled="sending"
+              @click="sendText(c.text)"
+            >{{ c.label }}</button>
+          </div>
           <el-input
             v-model="input"
             type="textarea"
@@ -125,13 +133,19 @@
             <el-button type="primary" size="small" :loading="sending" @click="send">发送</el-button>
           </div>
         </footer>
+        <span class="agent-resize n" @pointerdown.stop="onResizePointerDown($event, 'n')"></span>
+        <span class="agent-resize e" @pointerdown.stop="onResizePointerDown($event, 'e')"></span>
+        <span class="agent-resize w" @pointerdown.stop="onResizePointerDown($event, 'w')"></span>
+        <span class="agent-resize ne" @pointerdown.stop="onResizePointerDown($event, 'ne')"></span>
+        <span class="agent-resize nw" @pointerdown.stop="onResizePointerDown($event, 'nw')"></span>
       </section>
     </transition>
 
     <button
       class="agent-fab"
       :class="{ active: open }"
-      @click="open = !open"
+      @pointerdown="onFabPointerDown"
+      @click="onFabClick"
       :aria-label="open ? '收起智能助手' : '打开智能助手'"
       :title="open ? '收起智能助手' : '打开智能助手'"
     >
@@ -142,7 +156,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, computed, onBeforeUnmount } from 'vue'
+import { ref, nextTick, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { agentAPI, documentAPI, reviewAPI, compareAPI, convertAPI, getAPIErrorMessage } from '@/api'
 import { ElMessage } from 'element-plus'
@@ -156,7 +170,26 @@ const input = ref('')
 const sending = ref(false)
 const messages = ref([])
 const bodyRef = ref(null)
-const quickPrompts = ['帮我润色一段文本', '生成一篇使用说明书', '审核这份文档', '对比两个版本']
+const quickPrompts = [
+  { label: '润色文本', text: '帮我润色一段文本' },
+  { label: '生成文档', text: '生成一篇使用说明书' },
+  { label: '审核文档', text: '审核这份文档' },
+  { label: '对比版本', text: '对比两个版本' },
+  { label: '智能问答', text: '我想问知识库一个问题' },
+  { label: '格式转换', text: '帮我转换文档格式' }
+]
+const POS_KEY = 'agent-dock-pos'
+const SIZE_KEY = 'agent-dock-size'
+const MIN_PANEL_W = 360
+const MIN_PANEL_H = 420
+const DEFAULT_PANEL = { width: 480, height: 640 }
+const dockRef = ref(null)
+const dragging = ref(false)
+const dragMoved = ref(false)
+const dockPos = ref(null)
+const dockSize = ref({ ...DEFAULT_PANEL })
+let dragStart = null
+let resizeStart = null
 // 用响应式登录态（登录/退出即时生效），不再读非响应式 localStorage
 const isAuthenticated = computed(() => userStore.isLoggedIn)
 
@@ -166,6 +199,202 @@ const pollTimers = ref({})
 function setUploadInput(el, idx) {
   if (el) uploadInputs.value[idx] = el
 }
+
+const dockStyle = computed(() => {
+  if (!dockPos.value) return {}
+  return {
+    left: `${dockPos.value.left}px`,
+    bottom: `${dockPos.value.bottom}px`,
+    right: 'auto',
+    top: 'auto'
+  }
+})
+
+const panelStyle = computed(() => ({
+  width: `${dockSize.value.width}px`,
+  height: `${dockSize.value.height}px`
+}))
+
+function readSavedPos() {
+  try {
+    const raw = localStorage.getItem(POS_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (typeof parsed.left === 'number' && typeof parsed.bottom === 'number') return parsed
+  } catch (e) { /* ignore broken cache */ }
+  return null
+}
+
+function clampPos(left, bottom) {
+  const dock = dockRef.value
+  const w = dock ? dock.offsetWidth : 56
+  const h = dock ? dock.offsetHeight : 56
+  const maxLeft = Math.max(8, window.innerWidth - w - 8)
+  const maxBottom = Math.max(8, window.innerHeight - h - 8)
+  return {
+    left: Math.min(maxLeft, Math.max(8, left)),
+    bottom: Math.min(maxBottom, Math.max(8, bottom))
+  }
+}
+
+function persistPos(pos) {
+  dockPos.value = pos
+  try {
+    localStorage.setItem(POS_KEY, JSON.stringify(pos))
+  } catch (e) { /* quota / private mode */ }
+}
+
+function readSavedSize() {
+  try {
+    const raw = localStorage.getItem(SIZE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (typeof parsed.width === 'number' && typeof parsed.height === 'number') return parsed
+  } catch (e) { /* ignore broken cache */ }
+  return null
+}
+
+function clampSize(width, height) {
+  const maxW = Math.max(MIN_PANEL_W, window.innerWidth - 16)
+  const maxH = Math.max(MIN_PANEL_H, window.innerHeight - 80)
+  return {
+    width: Math.min(maxW, Math.max(MIN_PANEL_W, width)),
+    height: Math.min(maxH, Math.max(MIN_PANEL_H, height))
+  }
+}
+
+function persistSize(size) {
+  dockSize.value = size
+  try {
+    localStorage.setItem(SIZE_KEY, JSON.stringify(size))
+  } catch (e) { /* quota / private mode */ }
+}
+
+function ensureDockPos() {
+  if (dockPos.value || !dockRef.value) return
+  const rect = dockRef.value.getBoundingClientRect()
+  persistPos({
+    left: rect.left,
+    bottom: window.innerHeight - rect.bottom
+  })
+}
+
+function clampCurrent() {
+  persistSize(clampSize(dockSize.value.width, dockSize.value.height))
+  if (!dockPos.value) return
+  persistPos(clampPos(dockPos.value.left, dockPos.value.bottom))
+}
+
+function beginDrag(e) {
+  const dock = dockRef.value
+  if (!dock) return
+  const rect = dock.getBoundingClientRect()
+  dragging.value = true
+  dragStart = {
+    offsetX: e.clientX - rect.left,
+    offsetY: e.clientY - rect.top,
+    height: rect.height,
+    originX: e.clientX,
+    originY: e.clientY
+  }
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup', onDragEnd)
+  window.addEventListener('pointercancel', onDragEnd)
+}
+
+function onHeaderPointerDown(e) {
+  if (e.button !== 0) return
+  if (e.target.closest('.agent-header-actions')) return
+  e.preventDefault()
+  beginDrag(e)
+}
+
+function onFabPointerDown(e) {
+  if (e.button !== 0) return
+  dragMoved.value = false
+  beginDrag(e)
+}
+
+function onDragMove(e) {
+  if (!dragStart) return
+  if (Math.abs(e.clientX - dragStart.originX) > 4 || Math.abs(e.clientY - dragStart.originY) > 4) {
+    dragMoved.value = true
+  }
+  const left = e.clientX - dragStart.offsetX
+  const top = e.clientY - dragStart.offsetY
+  const bottom = window.innerHeight - top - dragStart.height
+  persistPos(clampPos(left, bottom))
+}
+
+function onDragEnd() {
+  dragStart = null
+  dragging.value = false
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', onDragEnd)
+  window.removeEventListener('pointercancel', onDragEnd)
+}
+
+function onFabClick() {
+  if (dragMoved.value) return
+  open.value = !open.value
+  nextTick(clampCurrent)
+}
+
+function onResize() {
+  clampCurrent()
+}
+
+function onResizePointerDown(e, edge) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  ensureDockPos()
+  dragging.value = true
+  resizeStart = {
+    edge,
+    x: e.clientX,
+    y: e.clientY,
+    width: dockSize.value.width,
+    height: dockSize.value.height,
+    left: dockPos.value ? dockPos.value.left : 0,
+    bottom: dockPos.value ? dockPos.value.bottom : 0
+  }
+  window.addEventListener('pointermove', onResizeDragMove)
+  window.addEventListener('pointerup', onResizeDragEnd)
+  window.addEventListener('pointercancel', onResizeDragEnd)
+}
+
+function onResizeDragMove(e) {
+  if (!resizeStart) return
+  const dx = e.clientX - resizeStart.x
+  const dy = e.clientY - resizeStart.y
+  const edge = resizeStart.edge
+  let width = resizeStart.width
+  let height = resizeStart.height
+  let left = resizeStart.left
+  if (edge.includes('e')) width = resizeStart.width + dx
+  if (edge.includes('w')) {
+    width = resizeStart.width - dx
+    left = resizeStart.left + dx
+  }
+  if (edge.includes('n')) height = resizeStart.height - dy
+  const next = clampSize(width, height)
+  if (edge.includes('w')) left = resizeStart.left + (resizeStart.width - next.width)
+  persistSize(next)
+  if (dockPos.value) persistPos(clampPos(left, dockPos.value.bottom))
+}
+
+function onResizeDragEnd() {
+  resizeStart = null
+  dragging.value = false
+  window.removeEventListener('pointermove', onResizeDragMove)
+  window.removeEventListener('pointerup', onResizeDragEnd)
+  window.removeEventListener('pointercancel', onResizeDragEnd)
+}
+
+watch(isAuthenticated, (ok) => {
+  if (ok) nextTick(clampCurrent)
+})
+
 function triggerUpload(idx) {
   const el = uploadInputs.value[idx]
   if (el) el.click()
@@ -193,6 +422,18 @@ function stopPolling(idx) {
 }
 onBeforeUnmount(() => {
   Object.values(pollTimers.value).forEach(t => clearInterval(t))
+  window.removeEventListener('resize', onResize)
+  onDragEnd()
+  onResizeDragEnd()
+})
+
+onMounted(() => {
+  const saved = readSavedPos()
+  if (saved) dockPos.value = saved
+  const savedSize = readSavedSize()
+  if (savedSize) dockSize.value = savedSize
+  nextTick(clampCurrent)
+  window.addEventListener('resize', onResize)
 })
 
 function scrollToBottom() {
@@ -518,26 +759,47 @@ function retryTask(idx, msg) {
 <style scoped>
 /* z-index 低于 Element Plus 弹层（~2000+），避免盖住对话框；小屏自适应宽度 */
 .agent-dock { position: fixed; right: 24px; bottom: 24px; z-index: 1500; max-width: calc(100vw - 32px); }
+.agent-dock.dragging { user-select: none; }
 .agent-fab {
   width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
   background: #409eff; color: #fff; display: flex; align-items: center; justify-content: center;
   box-shadow: 0 6px 20px rgba(64, 158, 255, .4); margin-left: auto; transition: transform .2s, background .2s;
+  touch-action: none;
 }
 .agent-fab:hover { transform: translateY(-2px); background: #337ecc; }
+.agent-dock.dragging .agent-fab:hover { transform: none; }
 .agent-fab.active { background: #5a5a5a; box-shadow: 0 4px 14px rgba(0, 0, 0, .2); }
 .agent-panel {
-  width: 360px; height: 540px; max-width: 100%; max-height: calc(100vh - 120px); margin-bottom: 12px; margin-left: auto;
+  position: relative; width: 480px; height: 640px; max-width: calc(100vw - 16px); max-height: calc(100vh - 80px); margin-bottom: 12px; margin-left: auto;
   background: #fff; border: 1px solid #e4e7ed; border-radius: 14px; overflow: hidden;
   box-shadow: 0 10px 40px rgba(0, 0, 0, .16); display: flex; flex-direction: column;
 }
+.agent-resize { position: absolute; z-index: 3; }
+.agent-resize.n { top: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.agent-resize.e { top: 10px; right: 0; bottom: 10px; width: 6px; cursor: ew-resize; }
+.agent-resize.w { top: 10px; left: 0; bottom: 10px; width: 6px; cursor: ew-resize; }
+.agent-resize.ne { top: 0; right: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.agent-resize.nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+.agent-resize.nw::after, .agent-resize.ne::after {
+  content: ''; position: absolute; top: 4px; width: 8px; height: 8px;
+  border-top: 2px solid #c0c4cc;
+}
+.agent-resize.nw::after { left: 4px; border-left: 2px solid #c0c4cc; }
+.agent-resize.ne::after { right: 4px; border-right: 2px solid #c0c4cc; }
 .agent-header {
   height: 52px; flex: 0 0 52px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between;
   background: #f5f7fa; border-bottom: 1px solid #e4e7ed;
+  cursor: grab; touch-action: none;
 }
+.agent-dock.dragging .agent-header { cursor: grabbing; }
 .agent-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #303133; }
+.agent-drag-grip {
+  width: 8px; height: 14px; flex: 0 0 8px;
+  background: radial-gradient(#c0c4cc 1.15px, transparent 1.2px) 0 0 / 4px 5px;
+}
 .agent-title-dot { width: 8px; height: 8px; border-radius: 50%; background: #409eff; }
 .agent-title-sub { font-size: 12px; font-weight: 400; color: #909399; }
-.agent-header-actions { display: flex; gap: 4px; }
+.agent-header-actions { display: flex; gap: 4px; cursor: pointer; }
 .agent-icon-btn {
   width: 28px; height: 28px; border: none; background: transparent; color: #606266; cursor: pointer;
   border-radius: 6px; display: flex; align-items: center; justify-content: center;
@@ -553,6 +815,10 @@ function retryTask(idx, msg) {
   padding: 6px 12px; font-size: 12px; cursor: pointer; transition: all .2s;
 }
 .agent-chip:hover { background: #ecf5ff; border-color: #409eff; }
+.agent-chip:disabled { opacity: .5; cursor: not-allowed; }
+.agent-chip:disabled:hover { background: #fff; border-color: #dcdfe6; }
+.agent-footer .agent-chips { margin-bottom: 8px; }
+.agent-footer .agent-chip { padding: 4px 8px; font-size: 11px; }
 .agent-msg { display: flex; flex-direction: column; margin-bottom: 14px; align-items: flex-start; }
 .agent-msg.user { align-items: flex-end; }
 .agent-bubble {
