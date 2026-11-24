@@ -9705,6 +9705,15 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - Barcode Primer拼写检查', 'general', 92,
         )
 
+    for match in re.finditer(r'Workpace\b', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '拼写错误',
+            '建议改为“Workspace”',
+            '缺少字母 s。界面截图与惯例写法均为 Workspace，正文写成 Workpace。',
+            'CYY人工审核经验基线 - Workspace拼写检查', 'general', 92,
+        )
+
     for match in re.finditer(r'Frag\s+Buffe\b', normalized):
         add_issue(
             match.start(), match.end(), match.group(0),
@@ -9733,12 +9742,27 @@ def _run_chinese_human_baseline_rules(content):
         )
 
     for match in re.finditer(r'2\s*℃\s*~\s*8\s*℃', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        # 方向修正（T7RS R01 实测 + Tina p64 裁定）：全文 ℃~ 64 处 vs ℃ ~ 0 处，
+        # 「~ 两侧加空格」是把少数派当多数派（旧建议 '2 ℃ ~ 8 ℃' 系误报，
+        # 且与 DET-CN-UNITSPACE 在同一位置重复上报）。本规则只处理「同一区间内
+        # 两侧 ℃ 间距不一致」（如 2 ℃~8℃），统一形式按原文风格保留 ~ 无空格。
+        parts = raw.split('~')
+        if len(parts) != 2:
+            continue
+        left, right = parts[0].strip(), parts[1].strip()
+        left_spaced = bool(re.match(r'\d\s+℃$', left))
+        right_spaced = bool(re.match(r'\d\s+℃$', right))
+        if left_spaced == right_spaced:
+            continue  # 两侧一致 → 无间距不一致问题；紧贴少数派由 DET-CN-UNITSPACE 统一处理
+        fixed = ('2 ℃~8 ℃' if left_spaced else '2℃~8℃')
+        suggestion = f'建议同一区间内两侧温度写法一致（如“{fixed}”）'
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-001', '数字与单位格式',
-            '建议统一为“2 ℃ ~ 8 ℃”',
-            '单位前面加空格。数字、波浪线与温度单位的空格风格需要统一。',
-            'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
+            suggestion,
+            '同一温度区间内“数字与 ℃”的间距写法不一致（一侧有空格一侧紧贴），应统一。',
+            'CYY人工审核经验基线 - 温度范围单位空格', 'general', 90,
         )
 
     for match in re.finditer(r'0\.2mL', normalized):
@@ -14284,6 +14308,25 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 pdf_visual_verification['geometry_hint_count'] = len(hints)
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
+
+        # AI 建议方向锚定守卫：AI「统一写法」类建议的目标形式全文 0 处或为
+        # 少数派时丢弃（prompt 级锚定对 CN 实测无效，此处确定性兜底）。
+        try:
+            from app.review_engine.ai_suggestion_anchor import should_drop_minority_target_issue
+            _before_anchor = len(issues)
+            _kept_after_anchor = []
+            for _it in issues:
+                if should_drop_minority_target_issue(_it, content):
+                    print(f"[审核] AI锚定守卫丢弃: {_it.get('category', '')} | "
+                          f"{str(_it.get('original_text') or '')[:40]!r} -> "
+                          f"{str(_it.get('suggestion') or '')[:40]!r}")
+                    continue
+                _kept_after_anchor.append(_it)
+            issues = _kept_after_anchor
+            if len(issues) != _before_anchor:
+                print(f"[审核] AI锚定守卫: {_before_anchor} -> {len(issues)}")
+        except ImportError:
+            pass
 
         retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
         if retained_ai_count:

@@ -19,7 +19,9 @@ def init_data():
             "rule_no": "R001",
             "category": "标点符号",
             "description": "中文文档应使用全角标点",
-            "regex": r"(?<![a-zA-Z])[.,?!;](?![a-zA-Z])",
+            # 数字邻接排除（3.5 / 12:30 不是半角标点误用）；补 ':'（T7RS R02
+            # 人工批注 p113「面:」→ 全角冒号，旧字符集漏冒号）
+            "regex": r"(?<![a-zA-Z0-9])[.,?!;:](?![a-zA-Z0-9])",
             "example": "Hello. 应改为 Hello。",
             "suggestion": "请将半角标点替换为全角标点",
             "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
