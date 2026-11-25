@@ -1427,6 +1427,7 @@ async def get_scene_sources(
             "key": scene["key"],
             "kicker": scene["kicker"],
             "title": scene["title"],
+            "folder_count": scene["folder_count"],
             "file_count": scene["file_count"],
             "missing_paths": scene["missing_paths"],
             "files": files,

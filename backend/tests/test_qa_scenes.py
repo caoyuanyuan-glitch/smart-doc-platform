@@ -81,6 +81,7 @@ class QaScenesInventoryTest(unittest.TestCase):
             scenes = {item["key"]: item for item in build_scene_inventory(db)}
             style_scene = scenes["style"]
             names = [row["name"] for row in style_scene["files"]]
+            self.assertEqual(style_scene["folder_count"], 2)
             self.assertEqual(style_scene["file_count"], 2)
             self.assertIn("中文技术文档写作风格指南.md", names)
             self.assertIn("补充说明.md", names)
@@ -98,8 +99,29 @@ class QaScenesInventoryTest(unittest.TestCase):
         try:
             scenes = build_scene_inventory(db)
             self.assertEqual(len(scenes), 4)
+            self.assertTrue(all(item["folder_count"] == 0 for item in scenes))
             self.assertTrue(all(item["file_count"] == 0 for item in scenes))
             self.assertEqual(scenes[0]["missing_paths"][0], "写作规范/写作风格指南")
+        finally:
+            db.close()
+
+    def test_reflects_file_changes_between_calls(self):
+        db = self.SessionLocal()
+        try:
+            writing = self._add_folder(db, "写作规范")
+            style = self._add_folder(db, "写作风格指南", writing.id)
+            db.commit()
+
+            scenes = {item["key"]: item for item in build_scene_inventory(db)}
+            self.assertEqual(scenes["style"]["folder_count"], 1)
+            self.assertEqual(scenes["style"]["file_count"], 0)
+
+            self._add_file(db, style.id, "新增指南.md")
+            db.commit()
+
+            scenes = {item["key"]: item for item in build_scene_inventory(db)}
+            self.assertEqual(scenes["style"]["file_count"], 1)
+            self.assertEqual(scenes["style"]["files"][0]["name"], "新增指南.md")
         finally:
             db.close()
 
@@ -162,6 +184,7 @@ class QaScenesApiTest(unittest.TestCase):
     def test_admin_reads_scene_sources(self):
         data = self.client.get("/api/qa/scenes/sources").json()
         scenes = {item["key"]: item for item in data["scenes"]}
+        self.assertEqual(scenes["style"]["folder_count"], 1)
         self.assertEqual(scenes["style"]["file_count"], 1)
         self.assertEqual(scenes["style"]["files"][0]["name"], "风格指南.md")
         self.assertEqual(scenes["style"]["files"][0]["folder_path"], "写作规范/写作风格指南")

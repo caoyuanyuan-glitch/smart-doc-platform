@@ -136,6 +136,7 @@ def build_scene_inventory(db):
                     continue
                 folder_ids.append(folder_id)
 
+        folder_ids = list(dict.fromkeys(folder_ids))
         files = []
         seen = set()
         for folder_id in folder_ids:
@@ -159,6 +160,7 @@ def build_scene_inventory(db):
             "key": scene["key"],
             "kicker": scene["kicker"],
             "title": scene["title"],
+            "folder_count": len(folder_ids),
             "file_count": len(files),
             "missing_paths": missing_paths,
             "files": files,
