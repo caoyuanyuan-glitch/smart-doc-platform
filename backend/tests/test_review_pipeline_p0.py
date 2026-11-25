@@ -743,3 +743,23 @@ def test_t12_reference_term_audit_reports_tight_celsius_on_real_shape():
         issue.get("rule") == "DET-SPACE-GAP" and "20℃" in issue.get("original_text", "")
         for issue in issues
     ), [i.get("rule") for i in issues]
+
+
+def test_t13_space_unit_rule_survives_sanitize_and_threshold():
+    """DET-SPACE-UNIT（℃/°C 混用）必须通过 sanitize + value_score 双关卡。
+
+    goldset6 r10 实测：suggestion 被清空 + 置信降 10 后 score=32<45，
+    被 below_threshold 丢弃（drop_log 实录）。修复后应完整保留。
+    """
+    text = ("存于 2 ℃ 至 8 ℃。\n" * 55
+            + "离心 10 min 后置于 2 °C 环境。")
+    issues = review_api._sanitize_issue_suggestions(
+        review_api.check_units_and_spacing(text)
+    )
+    unit_issues = [i for i in issues if i.get("rule") == "DET-SPACE-UNIT"]
+    assert unit_issues, "DET-SPACE-UNIT 未产出"
+    sample = unit_issues[0]
+    assert sample.get("suggestion"), "suggestion 被误清空"
+    assert int(sample.get("confidence", 0)) >= 80, "confidence 被误降"
+    from app.review_engine.pipeline import normalize_issue, value_score
+    assert value_score(normalize_issue(sample)) >= 45, "value_score 仍低于流水线阈值"

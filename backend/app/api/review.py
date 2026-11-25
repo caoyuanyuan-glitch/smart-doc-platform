@@ -1765,7 +1765,11 @@ def _sanitize_issue_suggestions(issues):
                 suggestion = f"{unit_match.group(1)} {unit_match.group(2)}"
                 issue['suggestion'] = suggestion
         if suggestion and not validate_suggestion(issue.get('original_text', ''), suggestion):
-            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002'}:
+            # DET-SPACE-*（数值-单位写法统计型规则）的 suggestion 是「建议统一为 X」
+            # 类全文统一动作，original 是单位符号本身（如 ℃/°C 码位替换），
+            # validate_suggestion 的原文改写校验必然判 False——属误伤，豁免。
+            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002',
+                            'DET-SPACE-UNIT', 'DET-SPACE-GAP'}:
                 issue['suggestion'] = ''
                 issue['confidence'] = max(0, int(issue.get('confidence', 0) or 0) - 10)
     return issues
@@ -14263,6 +14267,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         db, content, doc_id=str(getattr(document, "filename", "") or "")
                     )
                     print(f"[审核] AI模式补充确定性审计发现问题: {len(ai_supplemental_issues)}个")
+                    for _dbg in ai_supplemental_issues[:10]:
+                        print(f"[审核] 补充审计明细: rule={_dbg.get('rule')} sev={_dbg.get('severity')} "
+                              f"src={_dbg.get('source')} orig={str(_dbg.get('original_text'))[:40]!r} "
+                              f"pos={str(_dbg.get('position'))[:80]!r}")
                     issues.extend(ai_supplemental_issues)
                 except Exception as e:
                     print(f"[审核] AI模式补充确定性审计执行失败: {e}")
