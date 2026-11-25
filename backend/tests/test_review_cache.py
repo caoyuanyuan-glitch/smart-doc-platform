@@ -3561,7 +3561,9 @@ def test_review_ai_chunk_timeout_seconds_uses_higher_default_for_large_chunks(mo
 
     timeout = review_api._review_ai_chunk_timeout_seconds("A" * 3000)
 
-    assert timeout == 50.0
+    # main 已把默认基础超时提高到 300s；大 chunk 的语义是"不低于 50s 下限"
+    assert timeout >= 50.0
+    assert timeout >= review_api._review_ai_chunk_timeout_seconds("A" * 100)
 
 
 def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
