@@ -66,6 +66,7 @@
       <div class="chat-toolbar">
         <div class="selected-tags">
           <span class="selected-tags-label">本次依据：</span>
+          <el-tag v-if="hasCachedCandidates" size="small" type="warning" effect="plain">离线缓存</el-tag>
           <template v-if="currentTitles.length">
             <el-tag v-for="t in currentTitles" :key="t" size="small">{{ t }}</el-tag>
             <el-button v-if="candidates.length > 1" size="small" text type="primary" @click="switchVisible = true">更换</el-button>
@@ -182,7 +183,10 @@
         <label v-for="c in candidates" :key="c.official_id" class="candidate-item" :class="{ active: pickedOfficialIds.includes(c.official_id) }">
           <input type="checkbox" :value="c.official_id" v-model="pickedOfficialIds" />
           <div>
-            <div class="candidate-title">{{ c.title }}</div>
+            <div class="candidate-title">
+              {{ c.title }}
+              <el-tag v-if="c.cached" size="small" type="warning" effect="plain" style="margin-left:6px">离线缓存</el-tag>
+            </div>
             <div class="candidate-meta">版本 {{ c.docuversion || '-' }} · {{ c.create_time || '-' }} · {{ c.size || '-' }}</div>
           </div>
         </label>
@@ -309,6 +313,7 @@ const sessionId = ref(null)
 const currentTitle = ref('说明书问答')
 const currentTitles = ref([])
 const candidates = ref([])
+const hasCachedCandidates = computed(() => candidates.value.some(c => c.cached))
 const messages = ref([])
 const sessionList = ref([])
 const chatBox = ref(null)

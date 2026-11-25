@@ -1,5 +1,10 @@
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from app.utils import official_manual
 from app.utils.official_manual import (
     dedup_latest_by_fcode,
     extract_search_keyword,
@@ -23,6 +28,17 @@ from app.utils.official_manual import (
 
 
 class OfficialManualUtilTest(unittest.TestCase):
+    def setUp(self):
+        self._cache_dir = Path(tempfile.mkdtemp())
+        self._cache_patch = mock.patch.object(
+            official_manual, "_en_cache_dir", return_value=self._cache_dir
+        )
+        self._cache_patch.start()
+
+    def tearDown(self):
+        self._cache_patch.stop()
+        shutil.rmtree(self._cache_dir, ignore_errors=True)
+
     def test_extract_prefers_product_field(self):
         self.assertEqual(
             extract_search_keyword("开机前要检查什么", "DNBSEQ-T1+"),
@@ -327,6 +343,49 @@ class OfficialManualUtilTest(unittest.TestCase):
         with self.assertRaises(OfficialSearchError) as ctx:
             search_official_manuals("T7+", client=FakeClient(), site="en")
         self.assertEqual(ctx.exception.library_url, "https://global-mgitech.com/resources/manual-library/")
+
+    def test_english_search_writes_cache_and_falls_back_offline(self):
+        class OkResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "status": 1,
+                    "items": [{
+                        "id": 71980,
+                        "cua_title": "DNBSEQ-T7+RS Genetic Sequencer System Guide_English_RUO",
+                        "file_url": "https://global-mgitech.com/wp-content/uploads/Documents/t7.pdf",
+                        "cua_fcode": "H-020-001143-00",
+                    }],
+                }
+
+        class OkClient:
+            def get(self, url, params=None, headers=None):
+                return OkResp()
+
+        class DownClient:
+            def get(self, url, params=None, headers=None):
+                raise ConnectionError("TLS connection closed")
+
+        online = search_official_manuals("T7+", client=OkClient(), site="en")
+        self.assertEqual(len(online), 1)
+        self.assertFalse(online[0].get("_cached"))
+
+        offline = search_official_manuals("T7+", client=DownClient(), site="en")
+        self.assertEqual(len(offline), 1)
+        self.assertTrue(offline[0].get("_cached"))
+        self.assertIn("System Guide", offline[0]["title"])
+
+    def test_english_pdf_cache_round_trip(self):
+        source = self._cache_dir / "source.pdf"
+        source.write_bytes(b"%PDF-1.4 cached")
+        url = "https://global-mgitech.com/wp-content/uploads/Documents/t7.pdf"
+        dest = self._cache_dir / "restored.pdf"
+        official_manual._cache_en_pdf(url, str(source))
+        self.assertTrue(official_manual.has_cached_en_pdf(url))
+        self.assertTrue(official_manual._restore_cached_en_pdf(url, str(dest)))
+        self.assertEqual(dest.read_bytes(), source.read_bytes())
 
 
 if __name__ == "__main__":
