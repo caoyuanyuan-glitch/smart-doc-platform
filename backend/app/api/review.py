@@ -14253,6 +14253,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_new_issues = len(issues) - pre_ai_count
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
+            # AI 模式下补跑确定性补充审计（引用完整性/术语基线/数值-单位空格等）。
+            # 这些规则此前只挂在 rule/hybrid 分支，mode=ai 时被整体跳过，
+            # 导致 goldset6 中文文档「-20℃ 缺空格」等确定性漏检（2026-11-25 验证：
+            # 规则在解析文本上可正确产出 4 条，但审核管道未调用）。
+            if engine_mode == "ai" and not snippet_review and document.file_type != 'xlsx':
+                try:
+                    ai_supplemental_issues = _run_reference_and_term_consistency_audit(
+                        db, content, doc_id=str(getattr(document, "filename", "") or "")
+                    )
+                    print(f"[审核] AI模式补充确定性审计发现问题: {len(ai_supplemental_issues)}个")
+                    issues.extend(ai_supplemental_issues)
+                except Exception as e:
+                    print(f"[审核] AI模式补充确定性审计执行失败: {e}")
+
         if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
             # 第一次回填：去重键的第 4 位是页码槽位，必须在 _finalize_review_issues 之前填好
             filled = _backfill_issue_page_numbers(issues, content)

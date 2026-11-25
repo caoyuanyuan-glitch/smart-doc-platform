@@ -714,3 +714,32 @@ def test_html_report_renders_needs_human_review_badge():
     assert "badge-manual" in html
     assert "需人工复核" in html
     assert html.count("需人工复核") == 1
+
+
+def test_t11_ai_mode_runs_supplemental_deterministic_audit():
+    """AI 模式必须补跑确定性补充审计（goldset6 -20℃ 漏检回归）。
+
+    双保险之一：源码断言——补充审计调用块必须挂在 ai_deep_review 阶段
+    之后、且条件为 engine_mode == "ai"。
+    """
+    source = open(review_api.__file__, encoding="utf-8").read()
+    marker = review_api._run_reference_and_term_consistency_audit.__name__
+    idx = source.find("ai_supplemental_issues = " + marker)
+    assert idx > 0, "review.py 中找不到 AI 模式补充确定性审计调用块"
+    # 必须在 ai_deep_review 阶段结束之后
+    assert source.find('_end_stage("ai_deep_review"', 0, idx) > 0
+    # 条件必须是 engine_mode == "ai"（rule/hybrid 分支已有同调用，不可互相替代）
+    guard = source[max(0, idx - 400):idx]
+    assert 'engine_mode == "ai"' in guard
+
+
+def test_t12_reference_term_audit_reports_tight_celsius_on_real_shape():
+    """双保险之二：真实解析文本形态——少数派紧贴 -20℃ 必须被报出。"""
+    spaced = "\n".join(f"将样品于 {i} ℃ 条件下保存。" for i in range(1, 60))
+    tight = "将组织切片的载片置于-20℃预冷的甲醇中。"
+    content = spaced + "\n" + tight
+    issues = review_api._run_reference_and_term_consistency_audit(None, content)
+    assert any(
+        issue.get("rule") == "DET-SPACE-GAP" and "20℃" in issue.get("original_text", "")
+        for issue in issues
+    ), [i.get("rule") for i in issues]
