@@ -9756,6 +9756,22 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 中文全角冒号', 'general', 91,
         )
 
+    # 中文语境括号半全角配对错乱（如“（xxx)”或“(xxx）”）——
+    # 只报开闭方向不匹配，不报“该用全角却用半角”（英文/型号/公式中半角括号是合法惯例，避免误报）
+    for match in re.finditer(r'（[^（）()]{1,60}\)|\([^()（）]{1,60}）', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if raw.startswith('（'):
+            fixed = raw[:-1] + '）'
+        else:
+            fixed = '(' + raw[1:]
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-PUNC-004', '标点符号',
+            f'括号开闭方向不匹配，建议改为“{fixed}”',
+            '括号开闭括号半全角不一致（开括号与闭括号必须同一全半角形式）。',
+            'CYY人工审核经验基线 - 括号半全角配对', 'general', 90,
+        )
+
     # 人工审核确认的文件名拼写（Tina R02 批注 p117/p118）
     for match in re.finditer(r'Workpace', normalized):
         add_issue(

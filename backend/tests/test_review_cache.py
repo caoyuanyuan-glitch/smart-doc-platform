@@ -3107,6 +3107,23 @@ def test_run_chinese_human_baseline_rules_detects_halfwidth_colon_after_chinese(
     )
 
 
+def test_run_chinese_human_baseline_rules_detects_mismatched_bracket_pair():
+    issues = review_api._run_chinese_human_baseline_rules("外观尺寸（见附录)与样品架(见附录）。")
+
+    pairs = {(issue["rule"], issue["original_text"]) for issue in issues}
+    assert ("CYY-CN-PUNC-004", "（见附录)") in pairs
+    assert ("CYY-CN-PUNC-004", "(见附录）") in pairs
+
+
+def test_run_chinese_human_baseline_rules_allows_consistent_halfwidth_brackets():
+    # 英文/型号语境的半角括号与中文全角括号配对均属合法，不得误报
+    issues = review_api._run_chinese_human_baseline_rules(
+        "使用 DNBSEQ-G400RS(StandardMPS 2.0) 平台；外观尺寸（宽×深×高）。"
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-PUNC-004" for issue in issues)
+
+
 def test_run_chinese_human_baseline_rules_detects_workpace_and_sequencetat_typo():
     issues = review_api._run_chinese_human_baseline_rules(
         "打开【Workpace】文件夹下的 Sequencetat.txt 文件。"
