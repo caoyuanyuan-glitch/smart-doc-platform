@@ -14,7 +14,9 @@ def test_prompt_contains_semantic_dimensions():
 
 def test_fewshot_contains_g99_anchor_phrases():
     assert "关于本指南" in SEMANTIC_FEWSHOT_EXAMPLES
-    assert "请点击" in SEMANTIC_FEWSHOT_EXAMPLES
+    # 用户裁定：中文说明书里的「请」「请勿」是标准写法，不得作为示例诱导模型上报
+    assert "请点击" not in SEMANTIC_FEWSHOT_EXAMPLES
+    assert "敬语" not in SEMANTIC_FEWSHOT_EXAMPLES
     assert "播放提示音" in SEMANTIC_FEWSHOT_EXAMPLES
     assert "返回主界面" in SEMANTIC_FEWSHOT_EXAMPLES
     assert "barcode" in SEMANTIC_FEWSHOT_EXAMPLES

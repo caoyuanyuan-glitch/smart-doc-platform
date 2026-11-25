@@ -206,3 +206,6 @@ backend/runtime.env
 backend/tests/fixtures/seed/*
 !backend/tests/fixtures/seed/.gitkeep
 !backend/tests/fixtures/seed/README.md
+
+# 根目录运行期上传产物（仅本地预览/联调用）
+/static/
