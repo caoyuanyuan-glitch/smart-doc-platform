@@ -100,6 +100,11 @@ REVIEW_BASIS_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "中文说明书写作Checklist.xlsx",
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "英文说明书写作Checklist.xlsx",
     PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json",
+    # 本地兜底规范副本（审核依据目录）；路径不存在时 stat 失败自动跳过。
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "中文技术文档写作风格指南.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "MGI英文技术文档写作风格指南.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "技术文档常见错误清单与规范.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "2026历史人工审核意见知识库.md",
 ]
 REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
@@ -6375,6 +6380,19 @@ def _load_review_spec_texts(db: Session):
         except Exception as exc:
             print(f"[审核] 读取知识库规范文件失败 {spec_key}: {exc}")
             spec_texts[spec_key] = ""
+
+    # 本地兜底：知识库文件夹缺失或物理文件不可读（ACL）时，回退到「审核依据」本地副本。
+    # 知识库原文优先，仅填充空键，不覆盖已读到的知识库文本。
+    try:
+        from app.review_engine.writing_standards_fallback import load_fallback_spec_texts
+        fallback_texts = load_fallback_spec_texts()
+    except Exception as exc:
+        print(f"[审核] 加载本地规范兜底目录失败: {exc}")
+        fallback_texts = {}
+    for spec_key, fallback_text in fallback_texts.items():
+        if not spec_texts.get(spec_key) and fallback_text:
+            print(f"[审核] 规范基线 {spec_key} 知识库为空，启用本地兜底副本（{len(fallback_text)} 字符）")
+            spec_texts[spec_key] = fallback_text
     return spec_texts
 
 
@@ -6536,6 +6554,25 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
             "is_checklist": True,
         })
     parts.extend(_load_cyy_human_review_basis_sections())
+    # 人工审核判定硬约束：来自《2026历史人工审核意见知识库》的免报清单+判定流程+证据要求。
+    # 断言型意见必须满足证据要求才能出报告——术语一致性润色建议型误报的对症约束。
+    kb_text = spec_texts.get("human_review_kb") or ""
+    if kb_text:
+        try:
+            from app.review_engine.writing_standards_fallback import extract_human_review_kb_constraints
+            constraints = extract_human_review_kb_constraints(kb_text)
+        except Exception as exc:
+            print(f"[审核] 抽取人工审核判定约束失败: {exc}")
+            constraints = ""
+        if constraints:
+            parts.append({
+                "label": "人工审核判定硬约束",
+                "text": "【人工审核判定硬约束】\n" + constraints,
+                "priority": 5,
+                "language": "both",
+                "basis_type": "human_review_constraints",
+                "tags": ["false-positive-guard", "evidence-requirement"],
+            })
     # 人工审核意见的安全激活：抽象问题模式清单（不含具体文档错误原文，避免照搬臆造）
     try:
         from app.review_engine.human_review_patterns import load_pattern_sections
