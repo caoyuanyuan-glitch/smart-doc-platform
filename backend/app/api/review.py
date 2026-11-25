@@ -937,6 +937,31 @@ def _empty_judgment_stats():
     }
 
 
+def _compact_review_list_summary(summary):
+    """Keep list payloads small; full diagnostics stay on aggregated-report."""
+    if summary in (None, ""):
+        return "{}"
+    if isinstance(summary, dict):
+        data = summary
+    else:
+        text = str(summary).strip()
+        if not text:
+            return "{}"
+        try:
+            data = json.loads(text)
+        except Exception:
+            return text[:500]
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False)
+    keep = (
+        "total", "fatal", "serious", "general", "suggestion",
+        "language", "cache_hit", "message", "step",
+        "ai_degraded", "ai_degraded_reason",
+    )
+    compact = {key: data.get(key) for key in keep if key in data}
+    return json.dumps(compact, ensure_ascii=False)
+
+
 def _judgment_stats_map(db: Session, review_ids):
     stats = {int(review_id): _empty_judgment_stats() for review_id in review_ids or []}
     if db is None or not stats:
@@ -965,11 +990,10 @@ def _judgment_stats_map(db: Session, review_ids):
 def _serialize_review_list_item(db: Session, review, document_map, judgment_stats=None):
     review = _reconcile_review_runtime_state(db, review)
     doc = document_map.get(review.document_id)
-    review_dict = review.__dict__.copy()
+    review_dict = {key: value for key, value in review.__dict__.items() if not str(key).startswith("_")}
     review_dict['document_name'] = doc.filename if doc else ''
     review_dict['document_file_type'] = doc.file_type if doc else ''
-    if not review_dict.get('summary'):
-        review_dict['summary'] = '{}'
+    review_dict['summary'] = _compact_review_list_summary(review_dict.get('summary'))
     review_dict['progress'] = get_progress(review.id)
     review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
     return review_dict
@@ -1974,6 +1998,7 @@ def _should_drop_known_false_positive_issue(issue):
         from app.review_engine.ruled_false_positives import (
             is_ruled_icon_artifact,
             is_ruled_learned_patch_overfit,
+            is_ruled_politeness,
             is_ruled_table_header_concat,
             is_ruled_ui_label_grammar,
             is_ruled_unit_zh_connect,
@@ -1981,7 +2006,8 @@ def _should_drop_known_false_positive_issue(issue):
         )
         if (is_ruled_warning_template(issue) or is_ruled_icon_artifact(issue)
                 or is_ruled_table_header_concat(issue) or is_ruled_unit_zh_connect(issue)
-                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)):
+                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)
+                or is_ruled_politeness(issue)):
             return True
     except ImportError:
         pass
@@ -2751,22 +2777,62 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     return all_issues, trace
 
 
+def _ai_chunk_span_key(issue: dict):
+    """同一 AI 分块内、同一原文与规则的问题视为重复。
+
+    AI 常为同一片段的同一问题给出不同 chapter 名（如表 70/表 71），
+    标准身份键因 chapter 不同而不合并，导致列表里出现完全相同的两条。
+    """
+    position = issue.get("position")
+    if isinstance(position, str):
+        text = position.strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            position = json.loads(text)
+        except Exception:
+            return None
+    if not isinstance(position, dict):
+        return None
+    chunk_index = position.get("chunk_index")
+    if chunk_index in (None, ""):
+        return None
+    original = str(issue.get("original_text") or "").strip()
+    if not original:
+        return None
+    from app.review_engine.matching.normalize import canonical_span
+    # 不比 rule/category：AI 常把同一片段同一原文归到"结构完整/结构完整性"
+    # 或不同规则名下，标签差异不代表是两个问题。
+    return (
+        "ai-chunk",
+        str(chunk_index),
+        str(position.get("chunk_start") or ""),
+        canonical_span(original),
+    )
+
+
 def _dedup_across_chunks(issues: list) -> list:
     """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。"""
     if len(issues) <= 1:
         return issues
     from app.review_engine.matching.identity import issue_identity_key
     result = []
+    result_keys = []
     for index, issue in enumerate(issues):
         original = str(issue.get("original_text", "") or "").strip()
         if not original:
             result.append(issue)
+            result_keys.append(None)
             continue
         issue.setdefault("candidate_id", f"cand-{index}")
-        key = issue_identity_key(issue)
+        key = _ai_chunk_span_key(issue) or issue_identity_key(issue)
         matched = False
-        for existing in result:
-            if issue_identity_key(existing) != key:
+        for result_index, existing in enumerate(result):
+            existing_key = result_keys[result_index]
+            if existing_key is None:
+                existing_key = issue_identity_key(existing)
+                result_keys[result_index] = existing_key
+            if existing_key != key:
                 continue
             keep_id = existing.get("candidate_id") or existing.get("rule") or ""
             existing["dedupe_reason"] = "same_identity_key"
@@ -2777,6 +2843,7 @@ def _dedup_across_chunks(issues: list) -> list:
             break
         if not matched:
             result.append(issue)
+            result_keys.append(key)
     return result
 
 
@@ -8485,15 +8552,6 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 占位符残留', 'serious', 97,
         )
 
-    for match in re.finditer(r'basecall\s*软件', normalized, re.IGNORECASE):
-        add_issue(
-            match.start(), match.end(), match.group(0),
-            'CYY-CN-MIXED-008', '中英文混用',
-            '建议统一为“碱基识别软件”或按术语表确认正式中文名称',
-            '中文说明书中残留英文术语，建议统一为正式中文术语。',
-            'CYY人工审核经验基线 - 中文说明书术语统一', 'serious', 95,
-        )
-
     for match in re.finditer(r'日期\s+(?:版本\s+)?20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日', normalized):
         add_issue(
             match.start(), match.end(), match.group(0),
@@ -9619,22 +9677,120 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 离心管缺字纠正', 'general', 91,
         )
 
-    for match in re.finditer(r'2\s*℃\s*~\s*8\s*℃', normalized):
+    for match in re.finditer(r'\d+(?:\.\d+)?℃(?:\s*[~～\-]\s*\d+(?:\.\d+)?℃)?', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        suggestion = re.sub(r'(\d)\s*(℃)', r'\1 \2', raw)
+        suggestion = re.sub(r'\s*([~～\-])\s*', r' \1 ', suggestion)
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-001', '数字与单位格式',
-            '建议统一为“2 ℃ ~ 8 ℃”',
+            f'建议统一为“{suggestion}”',
             '单位前面加空格。数字、波浪线与温度单位的空格风格需要统一。',
             'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
         )
 
-    for match in re.finditer(r'0\.2mL', normalized):
+    for match in re.finditer(r'\d+(?:\.\d+)?mL\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)mL', r'\1 mL', raw)
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-002', '数字与单位格式',
-            '建议统一为“0.2 mL”',
+            f'建议统一为“{fixed}”',
             '单位前面加空格。数字与体积单位之间的空格风格需要统一。',
             'CYY人工审核经验基线 - 体积单位空格', 'serious', 92,
+        )
+
+    # 存储容量 / 时间 / 长度单位紧贴数字（Tina R02 批注：单位前面缺空格）
+    for match in re.finditer(r'\d+(?:\.\d+)?(?:GB|TB|MB)\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'([\d.])(GB|TB|MB)\b', r'\1 \2', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-004', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。存储容量单位（GB/TB/MB）与数字之间需要空格。',
+            'CYY人工审核经验基线 - 存储容量单位空格', 'general', 90,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?min\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)min', r'\1 min', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-005', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。时间单位 min 与数字之间需要空格。',
+            'CYY人工审核经验基线 - 时间单位空格', 'general', 90,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?bp\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)bp', r'\1 bp', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-006', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。长度单位 bp 与数字之间需要空格。',
+            'CYY人工审核经验基线 - 长度单位空格', 'general', 90,
+        )
+
+    # 全角括号前多余空格（Tina R02 批注 p41：600 mm （宽））
+    for match in re.finditer(r'\d+\s*(?:mm|cm)\s+（[^）]{1,6}）', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'\s+（', '（', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-007', '数字与单位格式',
+            f'建议删除括号前空格：“{fixed}”',
+            '全角括号前存在多余空格，尺寸标注格式不规范。',
+            'CYY人工审核经验基线 - 括号前多余空格', 'general', 89,
+        )
+
+    # 中文后半角冒号（Tina R02 批注 p113：登录界面:）
+    for match in re.finditer(r'[\u4e00-\u9fff]:', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNC-003', '标点符号',
+            f'建议改为全角冒号：“{match.group(0)[:-1]}：”',
+            '中文语境中使用了半角冒号，应改为全角冒号。',
+            'CYY人工审核经验基线 - 中文全角冒号', 'general', 91,
+        )
+
+    # 人工审核确认的文件名拼写（Tina R02 批注 p117/p118）
+    for match in re.finditer(r'Workpace', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '拼写错误',
+            '建议改为“Workspace”',
+            '界面截图为 Workspace，正文少了一个字母 s。',
+            'CYY人工审核经验基线 - Workspace拼写', 'serious', 95,
+        )
+
+    for match in re.finditer(r'Sequencetat', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-008', '拼写错误',
+            '建议改为“SequenceStat”',
+            '与同段 BarcodeStat.txt 命名规律不符，SequenceStat.txt 少了字母 s。',
+            'CYY人工审核经验基线 - SequenceStat拼写', 'serious', 95,
+        )
+
+    for match in re.finditer(r'平均数据产出数据量', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REDUNDANCY-004', '重复内容',
+            '建议改为“平均产出数据量”',
+            '“数据产出数据量”语义重复，应精简。',
+            'CYY人工审核经验基线 - 产出数据量表述', 'general', 91,
+        )
+
+    for match in re.finditer(r'废液存储组件', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-032', '术语一致性',
+            '建议统一为“废液储存组件”',
+            '同表前文使用“试剂储存组件”，此处“存储”与“储存”不统一。',
+            'CYY人工审核经验基线 - 储存术语统一', 'general', 90,
         )
 
     for match in re.finditer(r'\d+(?:\.\d+)?VDC，\d+(?:\.\d+)?A', normalized):
@@ -13206,6 +13362,29 @@ def run_term_check(content, terms):
     return issues
 
 
+_TYPO_CATEGORIES = {"拼写错误", "拼写/用词错误", "拼写", "术语一致性", "格式规范", "格式排版"}
+
+
+def _is_rule_ai_same_typo(a, b):
+    """规则引擎报单个词、AI 报同一文件名的整句拼写问题 → 视为同一问题。"""
+    def src(x):
+        return str(x.get("source") or "").lower()
+
+    rule_issue, ai_issue = (a, b) if src(a) in {"rule", "spellcheck", "term"} else (b, a)
+    if src(rule_issue) not in {"rule", "spellcheck", "term"} or src(ai_issue) != "ai":
+        return False
+    rule_text = str(rule_issue.get("original_text") or "").strip()
+    ai_text = str(ai_issue.get("original_text") or "").strip()
+    # 拼错的词本身足够独特（≥6 字符），页码由不同阶段回填、可能不一致，
+    # 因此不比页码，避免 AI 条目页码未回填时漏合并。
+    if len(rule_text) < 6 or rule_text not in ai_text or rule_text == ai_text:
+        return False
+    if str(ai_issue.get("category") or "") in _TYPO_CATEGORIES:
+        return True
+    blob = " ".join(str(ai_issue.get(k) or "") for k in ("description", "suggestion", "rule"))
+    return bool(re.search(r"拼写|拼错|少.{0,3}字母|漏.{0,2}字母|文件名|文件名称", blob))
+
+
 def dedupe_issues_by_original(issues):
     """按 '分类 + 归一化原文 + 位置相近' 合并, 并保留出现次数最多的项"""
     if not issues:
@@ -13270,8 +13449,17 @@ def dedupe_issues_by_original(issues):
             continue
         from app.review_engine.matching.identity import issue_identity_key
         key = issue_identity_key(issue)
+        span_key = _ai_chunk_span_key(issue)
         matched_index = None
         for index, existing in enumerate(seen):
+            # 同一 AI 分块同一片段的同一问题，AI 自造的 chapter 可能只差"第N步"
+            if span_key is not None and _ai_chunk_span_key(existing) == span_key:
+                matched_index = index
+                break
+            # 必须早于 chapter/page 判断：规则条目与 AI 条目的章节名、页码来源不同
+            if _is_rule_ai_same_typo(existing, issue):
+                matched_index = index
+                break
             existing_chapter = _norm_chapter(existing.get("chapter"))
             issue_chapter = _norm_chapter(issue.get("chapter"))
             if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
@@ -13280,6 +13468,17 @@ def dedupe_issues_by_original(issues):
             issue_page = key[3]
             if existing_page and issue_page and existing_page != issue_page:
                 continue
+            # 同页同原文的 AI 条目：AI 常把同一标题标到相邻小节（章节名不同）→ 合并
+            if (
+                _same_issue(original_text, existing.get("original_text", ""))
+                and issue_page
+                and issue_page == existing_page
+                and str(issue.get("source") or "").lower() == "ai"
+                and str(existing.get("source") or "").lower() == "ai"
+                and str(issue.get("category") or "") == str(existing.get("category") or "")
+            ):
+                matched_index = index
+                break
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
                 and issue_chapter == existing_chapter
@@ -14103,6 +14302,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         from app.review_engine.evidence import enrich_issue_evidence
         from app.review_engine.profile import apply_rule_gating
         from app.review_engine.issue_status import compute_status_counts
+        # 兜底：视觉复核与证据补全阶段可能重新注入同分块同一片段的问题
+        issues = _dedup_across_chunks(issues)
+        # 视觉复核重注入的是未经统一去重的副本，需再走一次通用去重
+        issues = dedupe_issues_by_original(issues)
         gated, rule_gate_diagnostics = apply_rule_gating(issues, document_profile)
         issues = [enrich_issue_evidence(issue, document_model, source_format=pairing.source_format) for issue in gated]
         if pairing.input_mode == 'B':

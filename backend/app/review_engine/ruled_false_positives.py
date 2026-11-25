@@ -167,17 +167,61 @@ _TABLE_STRUCT_DEFECT = re.compile(
     r"缺列|列名缺失|缺少.{0,4}列|缺(?:少)?表头|表头缺失|结构不完整|列不完整"
 )
 # AI 描述只指向"文本粘连"本身 → 提取伪影
-_TABLE_CONCAT_ONLY = re.compile(r"粘连|连成|拼接|无法区分列|合并成|连在一起")
+_TABLE_CONCAT_ONLY = re.compile(
+    r"粘连|连成|拼接|无法区分列|无法判断列|合并成|连在一起|缺少分隔|缺失分隔|缺分隔"
+    r"|无分隔|未分隔|应可区分|列名应可区分"
+)
+# AI 描述指向"单元格内容缺失/表格结构缺陷" → 真问题，必须保留
+_TABLE_CONTENT_MISSING = re.compile(
+    r"无任何数据|未提供|缺少.{0,24}(?:数据|数值|内容|列名|列内容)|仅有表头|只有表头"
+)
+# 疑似多列表头被拼成一句：无中文句读标点的中英文长串（渲染页本应是分列）
+_HEADER_JOIN_PUNCT = re.compile(r"[，。、；：,.;:!？?]")
+# 描述明确指向"表格中两列内容之间缺少分隔"（不要求原文形态）
+_TABLE_COLUMN_SEP_HINT = re.compile(r"表格列|列与列|标题.{0,6}说明|符号.{0,6}标题")
+# 术语条目名与解释之间缺分隔符：用户确认是真缺陷（GB 术语表要求），不得当表头伪影丢
+_TERM_ENTRY_HINT = re.compile(r"术语条目|词条|条目名|条目与解释|术语表")
+# 图注/示意图"编号 + 名称 + 说明"被文本层拼成一句（渲染页同一行，实为并列要素）
+_CAPTION_HINT = re.compile(r"名称与说明.*(?:连写|分隔)|(?:连写|分隔).*名称与说明")
+_CAPTION_SHAPE = re.compile(r"^\d{1,2}\s*[\u4e00-\u9fff]")
+# 明确指出文件名/文件夹名与截图不一致、疑似漏字母 → 拼写真问题，不能当拼接伪影丢
+# （Tina R02 p117：【Workpace】应为 Workspace）
+_FILE_NAME_HINT = re.compile(r"文件夹名|文件名|少.{0,3}字母|漏字|拼写|截图为|截图写")
+
+
+def _looks_like_joined_headers(text: str) -> bool:
+    t = text.strip()
+    if not (6 <= len(t) <= 40):
+        return False
+    if _HEADER_JOIN_PUNCT.search(t):
+        return False
+    return bool(re.search(r"[\u4e00-\u9fff]", t))
 
 
 def is_ruled_table_header_concat(issue: Any) -> bool:
     original = _val(issue, "original_text").strip()
-    if original not in _TABLE_HEADER_CONCAT:
+    # rule 字段可能携带规则/判定文本（description 为空时由 canonicalize 回填）
+    blob = " ".join(_val(issue, k) for k in ("description", "suggestion", "rule"))
+    if _FILE_NAME_HINT.search(blob):
+        return False  # 文件名拼写错误是真问题
+    if _TERM_ENTRY_HINT.search(blob):
+        return False  # 术语条目分隔符缺失是真问题
+    # "缺少列分隔/缺少列间分隔"仍属粘连伪影，不能算结构缺陷
+    struct_defect = bool(_TABLE_STRUCT_DEFECT.search(blob)) and not re.search(
+        r"列(?:间)?的?分隔|列分隔", blob
+    )
+    # 原文是表头串、描述开头就指出粘连：后续"完整性受影响"属顺带表述，仍丢
+    if _looks_like_joined_headers(original) and _TABLE_CONCAT_ONLY.search(blob[:24]):
+        return True
+    if struct_defect or _TABLE_CONTENT_MISSING.search(blob):
+        return False  # 指出表格内容/结构缺陷 → 真问题，保留
+    if not _TABLE_CONCAT_ONLY.search(blob):
         return False
-    blob = _val(issue, "description") + " " + _val(issue, "suggestion")
-    if _TABLE_STRUCT_DEFECT.search(blob):
-        return False  # 指出表格结构缺陷 → 真问题，保留
-    return bool(_TABLE_CONCAT_ONLY.search(blob))
+    if original in _TABLE_HEADER_CONCAT or _looks_like_joined_headers(original):
+        return True
+    if _CAPTION_HINT.search(blob) and _CAPTION_SHAPE.match(original):
+        return True
+    return bool(_TABLE_COLUMN_SEP_HINT.search(blob))
 
 
 # ── 4. 中文单位与中文连接 ──────────────────────────────────────────
@@ -274,6 +318,141 @@ def is_ruled_ai_glued_word(issue: Any, content: str = "") -> bool:
     return all(part.lower() in content_lower for part in split if len(part) >= 2)
 
 
+# ── 7. 操作步骤「请」等敬语 ────────────────────────────────────────
+# 用户裁定：「请」「请勿」在中文说明书里是标准写法（「请勿」还表达禁止，
+# 删掉会改语义），一律不报。旧规则「操作步骤不得添加请等敬语」已从提示词移除，
+# 这里兜底拦截历史版本或模型自行产出的同类问题。
+_POLITENESS_HINT = re.compile(
+    r"敬语|不得添加[“\"'‘]?请|删除[“\"'‘]?请|不加[“\"'‘]?请|避免使用敬语"
+)
+
+
+def is_ruled_politeness(issue: Any) -> bool:
+    if "请" not in _val(issue, "original_text"):
+        return False
+    hint = " ".join(
+        _val(issue, key) for key in ("description", "suggestion", "rule")
+    )
+    return bool(_POLITENESS_HINT.search(hint))
+
+
+# ── 8. 纯排版空格/分隔体例（AI 自产出） ────────────────────────────
+# 中文技术文档里「中文与英文缩写之间是否加空格」「乘号/等号前后空格」
+# 「表格内同类条目的分隔体例」属排版风格。AI 常凭"正文别处有空格"反推
+# 全文不一致，价值极低且易误判（T7+RS 中文实测 24 条）。
+# 规则引擎（rule/term/spellcheck 来源）的显式单位规则保留，不进此过滤器。
+_SPACING_HINT = re.compile(r"空格|间距|分隔符|标点符号")
+# 出现这些词说明背后有实质缺陷，必须保留
+_SPACING_SUBSTANCE = re.compile(
+    r"错别字|拼写|错字|用词|语序|歧义|成分残缺|缺(?:少)?(?:主语|宾语|对象)"
+    r"|无法确定|重复|冗余|赘余|含义"
+)
+# 人工审核明确要求上报的格式问题，按原文形态判定，避免误伤"原文已合规"的 AI 误报
+# （Tina R02 批注：单位前面缺空格 / 括号前有多余空格）
+_NUM_UNIT_TIGHT = re.compile(r"\d(?:GB|TB|MB|min|bp|mm|cm|kg|mg|mL|μL|℃|°C|rpm|VDC)")
+_PAREN_SPACE_TIGHT = re.compile(r"[A-Za-z\u4e00-\u9fff]\s+（[^）]{1,8}）")
+_SPACING_EDGE = re.compile(
+    r"[\u4e00-\u9fff][A-Za-z0-9]|[A-Za-z0-9][\u4e00-\u9fff]|[=+×*/]\s*\d|\d\s*[=+×*/]"
+)
+
+
+def is_ruled_spacing_style(issue: Any) -> bool:
+    if _is_rule_sourced(issue):
+        return False
+    # 关键：AI 问题的 rule 字段常是判定文本，description 可能为空
+    # （canonicalize_issue_rule 会在落库前把 rule 文本回填进 description）。
+    blob = " ".join(_val(issue, key) for key in ("description", "suggestion", "rule"))
+    if not _SPACING_HINT.search(blob):
+        return False
+    if _SPACING_SUBSTANCE.search(blob):
+        return False
+    original = _val(issue, "original_text")
+    if _NUM_UNIT_TIGHT.search(original) or _PAREN_SPACE_TIGHT.search(original):
+        return False  # 数字与单位空格、括号前空格：人工要求上报
+    # 中英文/数字边界、描述指向括号空格、或原文本身含空格
+    return (
+        bool(_SPACING_EDGE.search(original))
+        or "括号" in blob
+        or " " in original
+    )
+
+
+# ── 9. 无依据的"术语不统一"指控 ────────────────────────────────────
+# AI 常在没有指出具体两种写法的情况下报"同一概念全文统一""术语混用"，
+# 建议栏只重复原文（T7+RS 实测 5~7 条）。人工审核要求给出具体对照才算问题。
+_TERM_CLAIM = re.compile(
+    r"同一(?:概念|术语|对象|动作|缩写)"
+    r"|术语(?:不统一|混用|不一致)"
+    r"|名称(?:不统一|不一致)"
+    r"|用词(?:混用|不统一)"
+)
+_TERM_CONCRETE = re.compile(r"→|->|应改为|应为|统一为|写成|改成")
+_ASCII_TERM_PAIR = re.compile(
+    r"([A-Za-z][A-Za-z0-9 ._+-]{1,30}?)\s*(?:与|和|/)\s*([A-Za-z][A-Za-z0-9 ._+-]{1,30})"
+)
+# 中文写法对照："振荡混匀与涡旋混匀""存储与储存"，两侧都是 ≥3 字实词才算
+_CJK_TERM_PAIR = re.compile(
+    r"([\u4e00-\u9fff]{3,8})\s*(?:与|和)\s*([\u4e00-\u9fff]{3,8})"
+)
+_QUOTED_TERM = re.compile(r"[“\"「『]([^”\"」』]{1,30})[”\"」』]")
+
+
+def _norm_term(text: str) -> str:
+    return re.sub(r"[\s_]+", "", text).lower()
+
+
+def is_ruled_vague_term_claim(issue: Any) -> bool:
+    if _is_rule_sourced(issue):
+        return False
+    blob = " ".join(_val(issue, key) for key in ("description", "suggestion", "rule"))
+    if not _TERM_CLAIM.search(blob):
+        return False
+    if re.search(r"重复|冗余|赘余|精简|啰嗦", blob):
+        return False  # 语言重复类缺陷是真问题
+    if _TERM_CONCRETE.search(blob):
+        return False
+    quoted = _QUOTED_TERM.findall(blob)
+    if len(quoted) >= 2:
+        return False  # 引用了两种写法
+    if any(re.search(r"[→/]|与|和", term) for term in quoted):
+        return False  # 引号内直接给出对照
+    for left, right in _ASCII_TERM_PAIR.findall(blob):
+        # "DualBarcode 与 Dual Barcode" 是同一写法的大小写/空格差异，不算具体对照
+        if _norm_term(left) != _norm_term(right):
+            return False  # 指出了两种不同写法，是真问题
+    for left, right in _CJK_TERM_PAIR.findall(blob):
+        if left != right:
+            return False  # 中文写法对照（"振荡混匀与涡旋混匀"）
+    return True
+
+
+# ── 10. AI 自认"没问题"却仍生成的结论 ─────────────────────────────
+# 实测 "X 轴 Cycle 数：图表与正文描述一致" 被当成问题上报。
+# 只认"X 与 Y 一致/相符"这种成对结论，避免把"术语一致性"这类分类标签当结论。
+_POSITIVE_VERDICT = re.compile(
+    r"(?:与|和)[^。；，,;]{0,14}?(?:一致|相符|吻合|无误|无问题)"
+)
+_POSITIVE_NEGATION = re.compile(
+    r"不(?:一致|相符|吻合|正确|符合)|未发现问题|缺失|缺少|错误|重复|冗余"
+    r"|建议|应(?:改|为|统一|补|核|与)|需(?:改|要|补|核|与|确)"
+    r"|须(?:与|核)|必须|务必|无法|不清|待(?:确认|核)|混用|不统一"
+    r"|[应需须]"
+)
+
+
+def is_ruled_positive_verdict(issue: Any) -> bool:
+    if _is_rule_sourced(issue):
+        return False
+    # 只处理"短结论句"（如"图表与正文描述一致"）；长描述多半在讲具体缺陷。
+    # 长度只按判定文本算，suggestion 常附带改写建议（"X 轴 Barcode ID"），
+    # 不能让它把短结论句挤出阈值。
+    text = " ".join(_val(issue, key) for key in ("description", "rule")).strip()
+    if len(text) > 24:
+        return False
+    blob = f"{text} {_val(issue, 'suggestion')}"
+    return bool(_POSITIVE_VERDICT.search(text)) and not _POSITIVE_NEGATION.search(blob)
+
+
 # ── 总入口 ─────────────────────────────────────────────────────────
 def should_drop_ruled_fp(issue: Any, content: str = "") -> bool:
     return (
@@ -283,5 +462,9 @@ def should_drop_ruled_fp(issue: Any, content: str = "") -> bool:
         or is_ruled_unit_zh_connect(issue)
         or is_ruled_ui_label_grammar(issue)
         or is_ruled_learned_patch_overfit(issue)
+        or is_ruled_politeness(issue)
+        or is_ruled_spacing_style(issue)
+        or is_ruled_vague_term_claim(issue)
+        or is_ruled_positive_verdict(issue)
         or is_ruled_ai_glued_word(issue, content)
     )
