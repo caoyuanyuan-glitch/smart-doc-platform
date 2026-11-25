@@ -274,12 +274,42 @@ def is_ruled_ai_glued_word(issue: Any, content: str = "") -> bool:
     return all(part.lower() in content_lower for part in split if len(part) >= 2)
 
 
+# ── 3b. T7RS 实测表格拼接伪影（2026-11-24，待园园复核后转正） ──────
+# 表头单元格拼接（货号/名称/型号…、温度/时间、组分/管盖颜色）与
+# 接口电源表行拼接（【GND】地线连接地线 = [地线][连接地线] 两格）。
+# 渲染页里都是分开的单元格；文本层拼接本身不是文档缺陷。
+# 双重闸门防误伤：① 原文含特征键；② 建议侧确属「插空格/要求分隔」类
+# 诉求，或指出表格结构缺陷（真问题）时不拦。
+_T7RS_TABLE_CONCAT_KEYS = (
+    "产品货号产品名称产品型号", "版本编号试剂盒版本号", "货号名称型号推荐品牌",
+    "温度时间", "组分管盖颜色", "文库类型转换酶用量",
+    "地线连接地线", "火线连接火线", "零线连接零线",
+    "光纤接口连接网络", "网络接口连接网络", "网口连接UPS",
+)
+
+
+def is_ruled_t7rs_table_concat(issue: Any) -> bool:
+    original = _val(issue, "original_text").strip()
+    if not any(k in original for k in _T7RS_TABLE_CONCAT_KEYS):
+        return False
+    blob = _val(issue, "description") + " " + _val(issue, "suggestion")
+    if _TABLE_STRUCT_DEFECT.search(blob):
+        return False  # 指出表格结构缺陷 → 真问题，保留
+    sug = _val(issue, "suggestion").strip()
+    spacing_insert = (
+        re.sub(r"\s+", "", sug) == re.sub(r"\s+", "", original) and sug != original
+    )
+    asks_spacing = bool(re.search(r"加空格|添加空格|分隔|分列|粘连|连成|无法区分", blob))
+    return bool(spacing_insert or asks_spacing)
+
+
 # ── 总入口 ─────────────────────────────────────────────────────────
 def should_drop_ruled_fp(issue: Any, content: str = "") -> bool:
     return (
         is_ruled_warning_template(issue)
         or is_ruled_icon_artifact(issue)
         or is_ruled_table_header_concat(issue)
+        or is_ruled_t7rs_table_concat(issue)
         or is_ruled_unit_zh_connect(issue)
         or is_ruled_ui_label_grammar(issue)
         or is_ruled_learned_patch_overfit(issue)

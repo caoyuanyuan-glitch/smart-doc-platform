@@ -42,10 +42,14 @@ class TestTightDegreeUnit:
         text = "储存在 2 ℃~8 ℃环境中。" * 30
         assert check_tight_degree_unit(text) == []
 
-    def test_few_spaced_not_reported(self):
-        # 带空格样本不足（<5）时不构成「多数写法」
+    def test_mixed_usage_reported_even_if_spaced_few(self):
+        # 2026-11-24 口径更新（T7RS R01 Tina p41/p64 裁定）：数字与单位间加空格
+        # 是硬规范，全文混用（哪怕带空格仅 1 处）即不一致，紧贴处要报。
+        # 旧的「带空格 ≥5 且 ≥4×紧贴」多数派门槛已废弃。
         text = " 2 ℃ 环境以及2℃ 紧贴"
-        assert check_tight_degree_unit(text) == []
+        issues = check_tight_degree_unit(text)
+        assert len(issues) == 1
+        assert issues[0]["original_text"] == "2℃"
 
 
 class TestCatalogNumberFormat:

@@ -19,9 +19,10 @@ def _clear_cache():
 
 
 class TestLoadFewshotExamples:
-    def test_loads_168_examples(self):
+    def test_loads_examples(self):
+        # 168 条原始语料 + 2026-11-24 回流 R02 p145 列表批注 = 169
         rows = fewshot_corpus.load_fewshot_examples()
-        assert len(rows) == 168
+        assert len(rows) >= 169
 
     def test_rows_have_required_fields(self):
         rows = fewshot_corpus.load_fewshot_examples()

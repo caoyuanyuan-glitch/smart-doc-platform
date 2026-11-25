@@ -9705,6 +9705,15 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - Barcode Primer拼写检查', 'general', 92,
         )
 
+    for match in re.finditer(r'Workpace\b', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '拼写错误',
+            '建议改为“Workspace”',
+            '缺少字母 s。界面截图与惯例写法均为 Workspace，正文写成 Workpace。',
+            'CYY人工审核经验基线 - Workspace拼写检查', 'general', 92,
+        )
+
     for match in re.finditer(r'Frag\s+Buffe\b', normalized):
         add_issue(
             match.start(), match.end(), match.group(0),
@@ -9733,12 +9742,27 @@ def _run_chinese_human_baseline_rules(content):
         )
 
     for match in re.finditer(r'2\s*℃\s*~\s*8\s*℃', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        # 方向修正（T7RS R01 实测 + Tina p64 裁定）：全文 ℃~ 64 处 vs ℃ ~ 0 处，
+        # 「~ 两侧加空格」是把少数派当多数派（旧建议 '2 ℃ ~ 8 ℃' 系误报，
+        # 且与 DET-CN-UNITSPACE 在同一位置重复上报）。本规则只处理「同一区间内
+        # 两侧 ℃ 间距不一致」（如 2 ℃~8℃），统一形式按原文风格保留 ~ 无空格。
+        parts = raw.split('~')
+        if len(parts) != 2:
+            continue
+        left, right = parts[0].strip(), parts[1].strip()
+        left_spaced = bool(re.match(r'\d\s+℃$', left))
+        right_spaced = bool(re.match(r'\d\s+℃$', right))
+        if left_spaced == right_spaced:
+            continue  # 两侧一致 → 无间距不一致问题；紧贴少数派由 DET-CN-UNITSPACE 统一处理
+        fixed = ('2 ℃~8 ℃' if left_spaced else '2℃~8℃')
+        suggestion = f'建议同一区间内两侧温度写法一致（如“{fixed}”）'
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-001', '数字与单位格式',
-            '建议统一为“2 ℃ ~ 8 ℃”',
-            '单位前面加空格。数字、波浪线与温度单位的空格风格需要统一。',
-            'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
+            suggestion,
+            '同一温度区间内“数字与 ℃”的间距写法不一致（一侧有空格一侧紧贴），应统一。',
+            'CYY人工审核经验基线 - 温度范围单位空格', 'general', 90,
         )
 
     for match in re.finditer(r'0\.2mL', normalized):
@@ -11289,6 +11313,14 @@ def _run_manual_engineering_audit(content, file_type=None):
     for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
         art, word = match.group(1).lower(), match.group(2)
         wl = word.lower()
+        # 侧别标签/单位守卫：同行内大写 "A" 紧跟在字母数字之后（如 "side A outward"、
+        # "Flow cell A operation"、"32 A industrial"）属于侧别标记或安培单位，不是冠词。
+        # 仅同行前一字符为空格且再前一位是字母数字时触发；行首/句首的大写 A 不受影响。
+        if match.group(1) == 'A' and match.start() >= 2:
+            _an_prev1 = content[match.start() - 1]
+            _an_prev2 = content[match.start() - 2]
+            if _an_prev1 in ' \t' and _an_prev2.isalnum():
+                continue
         if len(word) == 1 or not word.isalpha() or wl in _AN_SKIP_WORDS:
             continue
         abbr_article = _abbrev_article(word)
@@ -11682,12 +11714,25 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 全文一致性守卫：先统计同一词形"带空格 word ("与"无空格 word("的出现次数。
+    # 只有无空格写法属于少数派（带空格为全文主写法）时才报，避免把全文统一的无空格
+    # 主写法（如 T7 EN 中 26 处 "Buffer("）整批误报为需要加空格。
+    _fmt003_space_counts = {}
+    _fmt003_nospace_counts = {}
+    for _m in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})[ \t]+\(', content):
+        _fmt003_space_counts[_m.group(1)] = _fmt003_space_counts.get(_m.group(1), 0) + 1
+    for _m in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\([A-Za-z0-9]', content):
+        _fmt003_nospace_counts[_m.group(1)] = _fmt003_nospace_counts.get(_m.group(1), 0) + 1
+
     for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\(([A-Za-z0-9][A-Za-z0-9 ./%+\-]{0,20})\)', content):
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
         if re.search(r'\b(?:Table|Figure|Chapter)\b', original, re.IGNORECASE):
             continue
         # 括号内为纯数值/进度计数（如 Progress(10/302)）时属于界面标签，非术语加括号说明
         if not re.search(r'[A-Za-z]', match.group(2)):
+            continue
+        # 主写法守卫：该词形无空格写法不少于带空格写法时，无空格即主写法，不报
+        if _fmt003_space_counts.get(match.group(1), 0) <= _fmt003_nospace_counts.get(match.group(1), 0):
             continue
         add_issue(
             match.start(),
@@ -13091,8 +13136,11 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     # Numeric punctuation inside decimals, versions, and enumerations is usually valid.
+    # 只看 match 紧邻 2 字符（T7RS R02 p113 实测：context 窗口 40 字符时
+    # 「登录界面:」因后方 40 字符内出现 IP "192.168" 被整条跳过——真漏报）。
     if rule_no == "R001":
-        if re.search(r"\d[\.,]\d", context):
+        near = content[max(0, start - 2):min(len(content), end + 2)]
+        if re.search(r"\d[\.,]\d", near):
             return True
 
     if rule_no == "R002":
@@ -13387,10 +13435,15 @@ def dedupe_issues_by_original(issues):
         for index, existing in enumerate(seen):
             existing_chapter = _norm_chapter(existing.get("chapter"))
             issue_chapter = _norm_chapter(issue.get("chapter"))
-            if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
-                continue
             existing_page = issue_identity_key(existing)[3]
             issue_page = key[3]
+            # 章节不同不直接排除：规则与 AI 对同一问题常提取出不同章节名
+            # （实测 T7 EN p181「测序停止」rule/AI 同文本同页因章节闸门漏折叠）。
+            # 页码一致时章节差异不作排除依据。
+            pages_agree = bool(existing_page and issue_page and existing_page == issue_page)
+            if (issue_chapter and existing_chapter and issue_chapter != existing_chapter
+                    and not pages_agree):
+                continue
             if existing_page and issue_page and existing_page != issue_page:
                 continue
             if _char_spans_disjoint(_issue_char_span(existing), _issue_char_span(issue)):
@@ -13398,8 +13451,11 @@ def dedupe_issues_by_original(issues):
                 continue
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
-                and issue_chapter == existing_chapter
-                and issue_identity_key(existing)[5] == key[5]
+                and (
+                    (issue_chapter == existing_chapter
+                     and issue_identity_key(existing)[5] == key[5])
+                    or pages_agree
+                )
             ):
                 matched_index = index
                 break
@@ -13726,6 +13782,26 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             content = content[:content_limit]
             content_truncation["truncated"] = original_content_length > len(content)
             content_truncation["kept_chars"] = len(content)
+        # 图内文字提取通路（园园 2026-11-24 裁定：截图/流程图内文字应可识别）：
+        # 图片型页面 → VL 模型 OCR → 与文本层 diff → 图内独有文字追加到 content
+        # 尾部（带页码标记），规则层与 AI 层共用。无视觉 key 时零成本降级。
+        image_text_augment = ""
+        if document.file_type == 'pdf' and not snippet_review:
+            try:
+                from app.review_engine.pdf_image_text import augment_pdf_image_text
+                image_text_augment, _image_text_diag = augment_pdf_image_text(
+                    _get_document_upload_path(document), review_id=review_id
+                )
+                if image_text_augment:
+                    content = content + "\n\n" + image_text_augment
+                    print(
+                        f"[审核] 图内文字提取: 页={_image_text_diag.get('pages_extracted')} "
+                        f"独有行={_image_text_diag.get('image_only_lines')}，已追加到审核上下文"
+                    )
+                else:
+                    print(f"[审核] 图内文字提取未产出: status={_image_text_diag.get('status')}")
+            except Exception as e:
+                print(f"[审核] 图内文字提取通路执行失败: {e}")
         # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
         content_truncated_chars = max(0, original_content_length - len(content))
         if content_truncated_chars:
@@ -13952,6 +14028,22 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         print(f"[审核] 中文确定性格式规则执行失败: {e}")
 
                     if document.file_type == 'pdf' and not snippet_review:
+                        try:
+                            from app.review_engine.pdf_char_spacing import detect_render_tight_units
+                            spacing_issues = detect_render_tight_units(_get_document_upload_path(document))
+                            if spacing_issues:
+                                print(f"[审核] PDF 渲染层字符间距(数字-单位紧贴)发现问题: {len(spacing_issues)}个")
+                                rule_issues.extend(spacing_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 渲染层字符间距规则执行失败: {e}")
+                        try:
+                            from app.review_engine.pdf_clipped_unit import detect_clipped_unit_chars
+                            clipped_issues = detect_clipped_unit_chars(_get_document_upload_path(document))
+                            if clipped_issues:
+                                print(f"[审核] PDF 渲染层字符裁剪(单位缺L)发现问题: {len(clipped_issues)}个")
+                                rule_issues.extend(clipped_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 渲染层字符裁剪规则执行失败: {e}")
                         try:
                             from app.review_engine.pdf_table_continuity import check_pdf_table_continuity
                             table_cont_issues = check_pdf_table_continuity(_get_document_upload_path(document))
@@ -14255,6 +14347,25 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 pdf_visual_verification['geometry_hint_count'] = len(hints)
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
+
+        # AI 建议方向锚定守卫：AI「统一写法」类建议的目标形式全文 0 处或为
+        # 少数派时丢弃（prompt 级锚定对 CN 实测无效，此处确定性兜底）。
+        try:
+            from app.review_engine.ai_suggestion_anchor import should_drop_minority_target_issue
+            _before_anchor = len(issues)
+            _kept_after_anchor = []
+            for _it in issues:
+                if should_drop_minority_target_issue(_it, content):
+                    print(f"[审核] AI锚定守卫丢弃: {_it.get('category', '')} | "
+                          f"{str(_it.get('original_text') or '')[:40]!r} -> "
+                          f"{str(_it.get('suggestion') or '')[:40]!r}")
+                    continue
+                _kept_after_anchor.append(_it)
+            issues = _kept_after_anchor
+            if len(issues) != _before_anchor:
+                print(f"[审核] AI锚定守卫: {_before_anchor} -> {len(issues)}")
+        except ImportError:
+            pass
 
         retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
         if retained_ai_count:
