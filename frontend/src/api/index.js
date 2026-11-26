@@ -379,6 +379,11 @@ export const qaAPI = {
   getDashboard: (params = {}) => instance.get('/qa/dashboard', { params }),
   getInitialSuggestions: (kbIds = [], limit = 4) => instance.get('/qa/suggestions/initial', { params: { kb_ids: kbIds.join(','), limit } }),
   getSceneSources: () => instance.get('/qa/scenes/sources'),
+  getCards: (params = {}) => instance.get('/qa/cards', { params }),
+  createCard: (payload) => instance.post('/qa/cards', payload),
+  updateCard: (cardId, payload) => instance.put(`/qa/cards/${cardId}`, payload),
+  deleteCard: (cardId) => instance.delete(`/qa/cards/${cardId}`),
+  reorderCards: (cardIds) => instance.put('/qa/cards/order', { card_ids: cardIds }),
 }
 
 export const manualAPI = {

@@ -378,7 +378,6 @@ function formatDuration(durationMs) {
 }
 
 function sceneEmptyText(scene) {
-  if (scene?.missing_paths?.length) return '该板块暂无资料 / 目录待同步'
   return '该板块暂无资料'
 }
 

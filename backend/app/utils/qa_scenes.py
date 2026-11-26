@@ -1,9 +1,8 @@
-"""Knowledge-base QA scene catalog and file inventory.
-
-Keep QA_SCENES.paths aligned with frontend/src/views/QA.vue SCENE_CARDS.
-"""
+"""Knowledge-base QA card catalog, inventory, and built-in seeding."""
 
 from app.models.knowledge import Folder, KnowledgeFile
+from app.models.qa_card import QaCard, QaCardSeedState
+from app.utils.qa_cards import card_to_dict, dump_suggestions, expand_folder_ids, replace_card_folders
 from app.utils.qa_knowledge_scope import AGENT_KB_ROOT_NAME
 
 
@@ -12,6 +11,14 @@ QA_SCENES = [
         "key": "style",
         "kicker": "写作规范",
         "title": "查规范与自检",
+        "description": "风格约定、常见错误、Checklist 与发布前核对项",
+        "accent": "#1d4ed8",
+        "suggestions": [
+            "中文技术文档标题和术语该怎么写",
+            "发布前我应该按哪些项做自检",
+            "说明书审核时要重点核对什么",
+        ],
+        "home_visible": True,
         "paths": [
             ["写作规范", "写作风格指南"],
             ["写作规范", "常见错误清单"],
@@ -24,6 +31,14 @@ QA_SCENES = [
         "key": "phrase",
         "kicker": "句式与记忆",
         "title": "找句式和译法",
+        "description": "说明书可套用的表达，以及已审核的中英对照",
+        "accent": "#0f766e",
+        "suggestions": [
+            "建库试剂说明书常用句式有哪些",
+            "这段中文在记忆库里有没有现成译法",
+            "记忆库里有哪些可复用的句对",
+        ],
+        "home_visible": True,
         "paths": [
             ["写作规范", "句式清单"],
             ["资源库", "记忆库"],
@@ -33,12 +48,28 @@ QA_SCENES = [
         "key": "term",
         "kicker": "术语库",
         "title": "查术语",
+        "description": "产品、模块与流程的标准译名和对照表",
+        "accent": "#be123c",
+        "suggestions": [
+            "这个术语的标准译名是什么",
+            "自动化相关术语有哪些对照",
+            "平台反馈过哪些术语需要统一",
+        ],
+        "home_visible": True,
         "paths": [["资源库", "术语库"]],
     },
     {
         "key": "files",
         "kicker": "文件资料",
         "title": "找文件资料",
+        "description": "说明书、手册和产品介绍等原始资料",
+        "accent": "#334155",
+        "suggestions": [
+            "这份说明书的主要内容是什么",
+            "产品介绍里强调了哪些功能",
+            "培训手册应该从哪一节开始读",
+        ],
+        "home_visible": False,
         "paths": [["资源库", "文件资料"]],
     },
 ]
@@ -114,7 +145,47 @@ def descendant_folder_ids(folder_id, children):
     return ids
 
 
+def seed_default_qa_cards(db):
+    """Write built-in QA cards once, after the knowledge base has been seeded."""
+    if db.query(QaCardSeedState).first():
+        return 0
+    if db.query(QaCard).count():
+        db.add(QaCardSeedState())
+        db.commit()
+        return 0
+
+    folders = db.query(Folder).all()
+    by_id, children = _folder_index(folders)
+    created = 0
+    for index, scene in enumerate(QA_SCENES, start=1):
+        card = QaCard(
+            key=scene["key"],
+            kicker=scene["kicker"],
+            title=scene["title"],
+            description=scene["description"],
+            accent=scene["accent"],
+            suggestions_json=dump_suggestions(scene["suggestions"]),
+            home_visible=scene.get("home_visible", True),
+            sort_order=index * 10,
+            created_by=None,
+        )
+        db.add(card)
+        db.flush()
+        folder_ids = []
+        for path in scene["paths"]:
+            folder = resolve_folder_by_path(children, path)
+            if folder is None or _is_agent_folder(folder, by_id):
+                continue
+            folder_ids.append(folder.id)
+        replace_card_folders(db, card, folder_ids)
+        created += 1
+    db.add(QaCardSeedState())
+    db.commit()
+    return created
+
+
 def build_scene_inventory(db):
+    cards = db.query(QaCard).order_by(QaCard.sort_order.asc(), QaCard.id.asc()).all()
     folders = db.query(Folder).all()
     by_id, children = _folder_index(folders)
     files_by_folder = {}
@@ -122,21 +193,9 @@ def build_scene_inventory(db):
         files_by_folder.setdefault(item.folder_id, []).append(item)
 
     scenes = []
-    for scene in QA_SCENES:
-        missing_paths = []
-        folder_ids = []
-        for path in scene["paths"]:
-            folder = resolve_folder_by_path(children, path)
-            if folder is None or _is_agent_folder(folder, by_id):
-                missing_paths.append("/".join(path))
-                continue
-            for folder_id in descendant_folder_ids(folder.id, children):
-                descendant = by_id.get(folder_id)
-                if descendant is None or _is_agent_folder(descendant, by_id):
-                    continue
-                folder_ids.append(folder_id)
-
-        folder_ids = list(dict.fromkeys(folder_ids))
+    for card in cards:
+        direct_ids = [row.folder_id for row in card.folders]
+        folder_ids = expand_folder_ids(db, direct_ids)
         files = []
         seen = set()
         for folder_id in folder_ids:
@@ -156,13 +215,11 @@ def build_scene_inventory(db):
                 })
 
         files.sort(key=lambda row: (row.get("folder_path") or "", row.get("name") or "", row.get("id") or 0))
-        scenes.append({
-            "key": scene["key"],
-            "kicker": scene["kicker"],
-            "title": scene["title"],
+        payload = card_to_dict(card, direct_ids)
+        payload.update({
             "folder_count": len(folder_ids),
             "file_count": len(files),
-            "missing_paths": missing_paths,
             "files": files,
         })
+        scenes.append(payload)
     return scenes
