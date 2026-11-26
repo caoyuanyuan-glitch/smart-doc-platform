@@ -21,6 +21,7 @@ import unicodedata
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 from app.api.auth import get_current_active_user, require_admin
 from app.database import get_db, SessionLocal
@@ -65,6 +66,25 @@ _memory_file_cache_lock = threading.Lock()
 _translation_stats_cache = {}
 _translation_stats_cache_lock = threading.Lock()
 CANCELED_TRANSLATION_PREFIX = "CANCELED:"
+
+
+def _translation_task_timeout_seconds() -> int:
+    """Hard deadline for a single document translation job (default: 30 minutes)."""
+    try:
+        configured = float(os.getenv("TRANSLATION_TASK_TIMEOUT_MINUTES", "30") or 30)
+    except (TypeError, ValueError):
+        configured = 30.0
+    return int(max(1, configured) * 60)
+
+
+def _task_started_at(task):
+    raw = (task or {}).get("started_at")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_completed_translation_filename(translated_filename: str) -> bool:
@@ -202,6 +222,36 @@ def _raise_if_translation_cancelled(doc_id: int | None):
         raise TranslationCancelled("翻译已停止")
 
 
+def _set_current_translation_doc(doc_id: int | None, deadline: float | None = None):
+    """Bind the background thread to a document so long-running loops can check cancel/deadline."""
+    _thread_locals.translation_doc_id = doc_id
+    _thread_locals.translation_deadline = deadline
+
+
+def _check_translation_abort():
+    """Abort promptly when the user cancels or the job exceeds its hard deadline."""
+    _raise_if_translation_cancelled(getattr(_thread_locals, "translation_doc_id", None))
+    deadline = getattr(_thread_locals, "translation_deadline", None)
+    if deadline is not None and time.monotonic() > deadline:
+        raise TimeoutError(
+            f"翻译任务超时（超过 {_translation_task_timeout_seconds() // 60} 分钟），请拆分文档后重试"
+        )
+
+
+def _set_translation_progress(stage: str, percent: float | None = None):
+    doc_id = getattr(_thread_locals, "translation_doc_id", None)
+    if not doc_id:
+        return
+    with _translate_tasks_lock:
+        task = _translate_tasks.get(doc_id)
+        if not task or task.get("status") != "processing":
+            return
+        task["stage"] = stage
+        if percent is not None:
+            task["progress"] = round(max(0.0, min(100.0, float(percent))), 1)
+        task["updated_at"] = datetime.utcnow().isoformat()
+
+
 def _mark_translation_canceled(doc_id: int, db: Session | None = None, message: str = "翻译已停止"):
     with _translate_tasks_lock:
         _translate_tasks[doc_id] = {"status": "canceled", "error": message}
@@ -239,6 +289,9 @@ def _reset_translation_usage_stats():
     _thread_locals.memory_match_trace = []
     _thread_locals.last_memory_hit_stats_qualified = False
     _thread_locals.memory_used_for_translation = False
+    _thread_locals.memory_lookup_cache = {}
+    _thread_locals.translation_doc_id = None
+    _thread_locals.translation_deadline = None
 
 
 def _get_translation_usage_stats():
@@ -816,6 +869,7 @@ def _normalize_token_sequence(value: str):
     )
 
 
+@lru_cache(maxsize=50000)
 def _token_subsequence_index(source_tokens, candidate_tokens):
     if not source_tokens or not candidate_tokens or len(candidate_tokens) > len(source_tokens):
         return -1
@@ -840,6 +894,7 @@ def _token_sequence_contains(container_tokens, candidate_tokens) -> bool:
     return _token_subsequence_index(container_tokens, candidate_tokens) >= 0
 
 
+@lru_cache(maxsize=20000)
 def _memory_candidate_priority(source_text: str, candidate_text: str):
     source_tokens = _normalize_token_sequence(source_text)
     candidate_tokens = _normalize_token_sequence(candidate_text)
@@ -1075,6 +1130,7 @@ def _fuzzy_surface_similarity(source_text: str, candidate_text: str) -> float:
     return min(score, 1.0)
 
 
+@lru_cache(maxsize=20000)
 def _memory_similarity(source_text: str, candidate_text: str) -> float:
     normalized_source = _normalize_match_text(source_text)
     normalized_candidate = _normalize_match_text(candidate_text)
@@ -1103,6 +1159,7 @@ def _memory_similarity(source_text: str, candidate_text: str) -> float:
     return max(ratio, compact_ratio, metadata_ratio, metadata_compact_ratio, fuzzy_ratio, fuzzy_compact_ratio)
 
 
+@lru_cache(maxsize=20000)
 def _memory_char_match_score(source_text: str, candidate_text: str) -> float:
     compact_source = _normalize_memory_lookup_key(source_text)
     compact_candidate = _normalize_memory_lookup_key(candidate_text)
@@ -1203,44 +1260,58 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
         return None
 
     indexed_entries = bundle.get("indexed_entries", [])
-    for indexed_entry in indexed_entries:
+
+    # Phase 1: exact / normalized hits via hash maps instead of a full scan.
+    exact_positions = []
+    for key, mapping in (
+        (normalized_source, bundle.get("exact_entry_map", {})),
+        (compact_source, bundle.get("compact_entry_map", {})),
+        (source_tokens, bundle.get("token_entry_map", {})),
+        (metadata_source, bundle.get("metadata_map", {})),
+        (metadata_compact_source, bundle.get("metadata_compact_map", {})),
+        (metadata_tokens, bundle.get("metadata_token_map", {})),
+    ):
+        if key:
+            position = mapping.get(key)
+            if position is not None:
+                exact_positions.append(position)
+    if exact_positions:
+        indexed_entry = indexed_entries[min(exact_positions)]
         entry = indexed_entry["entry"]
         candidate_source = entry["source_text"]
+        applied = None
+        reason = None
         if indexed_entry["normalized_source"] == normalized_source:
-            applied = entry["translated_text"]
-            _append_memory_match_trace(source_text, candidate_source, "normalized_exact", score=1.0, translated_text=applied)
-            return applied
-        if compact_source and indexed_entry["compact_source"] == compact_source:
+            applied, reason = entry["translated_text"], "normalized_exact"
+        elif compact_source and indexed_entry["compact_source"] == compact_source:
             applied = _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
-            _append_memory_match_trace(source_text, candidate_source, "compact_exact", score=1.0, translated_text=applied)
-            return applied
-        candidate_tokens = indexed_entry.get("normalized_tokens") or ()
-        if source_tokens and candidate_tokens and source_tokens == candidate_tokens:
+            reason = "compact_exact"
+        elif source_tokens and indexed_entry.get("normalized_tokens") == source_tokens:
             applied = _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
-            _append_memory_match_trace(source_text, candidate_source, "token_exact", score=1.0, translated_text=applied)
+            reason = "token_exact"
+        elif metadata_source and indexed_entry.get("metadata_source") == metadata_source:
+            applied, reason = entry["translated_text"], "metadata_exact"
+        elif metadata_compact_source and indexed_entry.get("metadata_compact_source") == metadata_compact_source:
+            applied, reason = entry["translated_text"], "metadata_compact_exact"
+        elif metadata_tokens and indexed_entry.get("metadata_tokens") == metadata_tokens:
+            applied, reason = entry["translated_text"], "metadata_token_exact"
+        if applied is not None:
+            _append_memory_match_trace(source_text, candidate_source, reason, score=1.0, translated_text=applied)
             return applied
-        if metadata_source and indexed_entry.get("metadata_source") == metadata_source:
-            applied = entry["translated_text"]
-            _append_memory_match_trace(source_text, candidate_source, "metadata_exact", score=1.0, translated_text=applied)
-            return applied
-        if metadata_compact_source and indexed_entry.get("metadata_compact_source") == metadata_compact_source:
-            applied = entry["translated_text"]
-            _append_memory_match_trace(source_text, candidate_source, "metadata_compact_exact", score=1.0, translated_text=applied)
-            return applied
-        candidate_metadata_tokens = indexed_entry.get("metadata_tokens") or ()
-        if metadata_tokens and candidate_metadata_tokens and metadata_tokens == candidate_metadata_tokens:
-            applied = entry["translated_text"]
-            _append_memory_match_trace(source_text, candidate_source, "metadata_token_exact", score=1.0, translated_text=applied)
-            return applied
+
+    # Phase 2: token subsequence, restricted to candidates sharing at least one token.
+    token_positions = set()
+    for token in set(source_tokens):
+        token_positions.update(bundle.get("token_index", {}).get(token, ()))
+    token_candidate_entries = _indexed_entry_positions(bundle, sorted(token_positions))
 
     token_subsequence_match = None
     token_subsequence_size = 0
-    for indexed_entry in indexed_entries:
+    for indexed_entry in token_candidate_entries:
         candidate_tokens = indexed_entry.get("normalized_tokens") or ()
         if len(candidate_tokens) < 2:
             continue
-        token_index = _token_subsequence_index(source_tokens, candidate_tokens)
-        if token_index < 0:
+        if _token_subsequence_index(source_tokens, candidate_tokens) < 0:
             continue
         candidate_compact = indexed_entry["compact_source"]
         if len(candidate_compact) < 6:
@@ -1286,8 +1357,17 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
     if compact_source:
         source_trigrams = set(compact_source[i:i + 3] for i in range(len(compact_source) - 2)) if len(compact_source) >= 3 else set()
         source_len = len(compact_source)
+        # Phase 3: trigram inverted index narrows the fuzzy pool to entries that
+        # share at least one trigram (plus short entries, which the old filter kept).
+        candidate_positions = (
+            set(range(len(indexed_entries)))
+            if not source_trigrams
+            else set(bundle.get("short_entry_indexes", ()))
+        )
+        for trigram in source_trigrams:
+            candidate_positions.update(bundle.get("trigram_index", {}).get(trigram, ()))
         filtered_pool = []
-        for indexed_entry in indexed_entries:
+        for indexed_entry in _indexed_entry_positions(bundle, sorted(candidate_positions)):
             candidate_compact = indexed_entry["compact_source"]
             candidate_len = indexed_entry["compact_len"]
             if not candidate_compact or not candidate_len:
@@ -1298,8 +1378,10 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
             if length_ratio < 0.4 or length_ratio > 2.5:
                 continue
             filtered_pool.append(indexed_entry)
-        if filtered_pool:
-            candidate_pool = filtered_pool
+        # A candidate that shares no trigram cannot pass the 0.3 overlap filter
+        # above, so an empty pool is a legitimate "no fuzzy match" result. The
+        # old fallback to the full entry list made every miss O(N) again.
+        candidate_pool = filtered_pool
 
     best_match = None
     best_candidate_source = None
@@ -1379,6 +1461,7 @@ def _translate_by_memory_segments(source_text: str, candidates, threshold: float
     matched_count = 0
 
     for segment in segments:
+        _check_translation_abort()
         if not segment or not segment.strip():
             translated_segments.append(segment)
             continue
@@ -1407,6 +1490,7 @@ def _translate_by_memory_clauses(source_text: str, candidates, threshold: float 
     matched_count = 0
 
     for clause in clauses:
+        _check_translation_abort()
         if not clause or not clause.strip():
             translated_clauses.append(clause)
             continue
@@ -1486,6 +1570,7 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
         return groups
 
     for index, segment in enumerate(segments):
+        _check_translation_abort()
         if not segment or not segment.strip():
             translated_segments[index] = segment
             continue
@@ -1511,6 +1596,7 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
 
     if unmatched_segments:
         for group in _build_unmatched_groups(unmatched_segments):
+            _check_translation_abort()
             group_texts = [unmatched_segments[idx] for idx in group]
             batched_translations = None
             if len(group_texts) > 1:
@@ -1579,6 +1665,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
         allow_partial = engine == "memory"
         next_pending = []
         for index in pending_indexes:
+            _check_translation_abort()
             result, hit = translate_with_memory(
                 texts[index],
                 source_lang,
@@ -1674,6 +1761,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                             translated_texts[idx] = _do_translate(texts[idx], engine, model, source_lang, target_lang, db)
         else:
             for batch_indexes in batch_groups:
+                _check_translation_abort()
                 if len(batch_indexes) == 1:
                     translated_texts[batch_indexes[0]] = _do_translate(texts[batch_indexes[0]], engine, model, source_lang, target_lang, db)
                 else:
@@ -2091,23 +2179,61 @@ def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: s
 
 
 def _build_memory_candidate_bundle(candidates):
+    """Build a searchable memory bundle with O(1) exact maps and inverted indexes.
+
+    The previous implementation only cached three exact maps and still scanned every
+    candidate for compact/metadata exact hits, token subsequences and trigram filtering.
+    With a large memory library that made every translated segment O(N) (and the
+    fuzzy phases O(N * similarity_cost)).  All lookups below are index-driven.
+    """
     exact_map = {}
     compact_map = {}
     token_map = {}
+    exact_entry_map = {}
+    compact_entry_map = {}
+    token_entry_map = {}
+    metadata_map = {}
+    metadata_compact_map = {}
+    metadata_token_map = {}
+    token_index = {}
+    trigram_index = {}
+    short_entry_indexes = []
     indexed_entries = []
-    for entry in candidates:
+
+    for position, entry in enumerate(candidates):
         normalized_source = _normalize_match_text(entry["source_text"])
         compact_source = _normalize_memory_lookup_key(entry["source_text"])
         normalized_tokens = _normalize_token_sequence(entry["source_text"])
         metadata_source = _strip_memory_match_metadata(entry["source_text"])
         metadata_compact_source = _normalize_metadata_free_compact_text(entry["source_text"])
         metadata_tokens = _normalize_metadata_free_token_sequence(entry["source_text"])
+        trigram_set = set(compact_source[i:i + 3] for i in range(len(compact_source) - 2)) if len(compact_source) >= 3 else set()
+
         if normalized_source and normalized_source not in exact_map:
             exact_map[normalized_source] = entry["translated_text"]
-        if compact_source and compact_source not in compact_map:
-            compact_map[compact_source] = entry["translated_text"]
-        if normalized_tokens and normalized_tokens not in token_map:
-            token_map[normalized_tokens] = entry["translated_text"]
+            exact_entry_map[normalized_source] = position
+        if compact_source:
+            compact_map.setdefault(compact_source, entry["translated_text"])
+            compact_entry_map.setdefault(compact_source, position)
+        if normalized_tokens:
+            token_map.setdefault(normalized_tokens, entry["translated_text"])
+            token_entry_map.setdefault(normalized_tokens, position)
+            for token in set(normalized_tokens):
+                token_index.setdefault(token, []).append(position)
+        if metadata_source:
+            metadata_map.setdefault(metadata_source, position)
+        if metadata_compact_source:
+            metadata_compact_map.setdefault(metadata_compact_source, position)
+        if metadata_tokens:
+            metadata_token_map.setdefault(metadata_tokens, position)
+
+        if trigram_set:
+            for trigram in trigram_set:
+                trigram_index.setdefault(trigram, []).append(position)
+        else:
+            # Short candidates have no trigrams; the old filter never rejected them.
+            short_entry_indexes.append(position)
+
         indexed_entries.append({
             "entry": entry,
             "normalized_source": normalized_source,
@@ -2117,15 +2243,30 @@ def _build_memory_candidate_bundle(candidates):
             "metadata_compact_source": metadata_compact_source,
             "metadata_tokens": metadata_tokens,
             "compact_len": len(compact_source),
-            "trigram_set": set(compact_source[i:i + 3] for i in range(len(compact_source) - 2)) if len(compact_source) >= 3 else set(),
+            "trigram_set": trigram_set,
         })
+
     return {
         "entries": candidates,
         "exact_map": exact_map,
         "compact_map": compact_map,
         "token_map": token_map,
+        "exact_entry_map": exact_entry_map,
+        "compact_entry_map": compact_entry_map,
+        "token_entry_map": token_entry_map,
+        "metadata_map": metadata_map,
+        "metadata_compact_map": metadata_compact_map,
+        "metadata_token_map": metadata_token_map,
+        "token_index": token_index,
+        "trigram_index": trigram_index,
+        "short_entry_indexes": short_entry_indexes,
         "indexed_entries": indexed_entries,
     }
+
+
+def _indexed_entry_positions(bundle, positions):
+    entries = bundle.get("indexed_entries", [])
+    return [entries[position] for position in positions if 0 <= position < len(entries)]
 
 
 def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str,
@@ -2155,22 +2296,23 @@ def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
 
     compact_source = _normalize_memory_lookup_key(source_text)
     if compact_source:
-        for indexed_entry in bundle.get("indexed_entries", []):
+        position = bundle.get("compact_entry_map", {}).get(compact_source)
+        if position is not None:
+            indexed_entry = bundle["indexed_entries"][position]
             entry = indexed_entry["entry"]
-            if indexed_entry["compact_source"] == compact_source:
-                applied = _apply_memory_translation_preserving_unmatched(
-                    source_text,
-                    entry["source_text"],
-                    entry["translated_text"],
-                )
-                _append_memory_match_trace(
-                    source_text,
-                    entry["source_text"],
-                    "compact_exact",
-                    score=1.0,
-                    translated_text=applied,
-                )
-                return applied
+            applied = _apply_memory_translation_preserving_unmatched(
+                source_text,
+                entry["source_text"],
+                entry["translated_text"],
+            )
+            _append_memory_match_trace(
+                source_text,
+                entry["source_text"],
+                "compact_exact",
+                score=1.0,
+                translated_text=applied,
+            )
+            return applied
 
     token_source = _normalize_token_sequence(source_text)
     if token_source:
@@ -2180,15 +2322,22 @@ def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
 
     metadata_compact_source = _normalize_metadata_free_compact_text(source_text)
     metadata_token_source = _normalize_metadata_free_token_sequence(source_text)
-    if metadata_source or metadata_compact_source or metadata_token_source:
-        for indexed_entry in bundle.get("indexed_entries", []):
-            entry = indexed_entry["entry"]
-            if metadata_source and indexed_entry.get("metadata_source") == metadata_source:
-                return entry["translated_text"]
-            if metadata_compact_source and indexed_entry.get("metadata_compact_source") == metadata_compact_source:
-                return entry["translated_text"]
-            if metadata_token_source and indexed_entry.get("metadata_tokens") == metadata_token_source:
-                return entry["translated_text"]
+    metadata_positions = []
+    if metadata_source:
+        position = bundle.get("metadata_map", {}).get(metadata_source)
+        if position is not None:
+            metadata_positions.append(position)
+    if metadata_compact_source:
+        position = bundle.get("metadata_compact_map", {}).get(metadata_compact_source)
+        if position is not None:
+            metadata_positions.append(position)
+    if metadata_token_source:
+        position = bundle.get("metadata_token_map", {}).get(metadata_token_source)
+        if position is not None:
+            metadata_positions.append(position)
+    if metadata_positions:
+        # The legacy loop returned the first matching entry in insertion order.
+        return bundle["indexed_entries"][min(metadata_positions)]["entry"]["translated_text"]
 
     stripped_source = (source_text or "").strip()
     if compact_source and stripped_source:
@@ -2394,8 +2543,27 @@ def _find_memory_glossary(source_text: str, candidates, max_entries: int = 20):
         return glossary
 
     compact_source = _normalize_memory_lookup_key(source_text)
+    normalized_source = (source_text or "").strip()
+    # Only terms that actually occur in the source can contribute. Sorting every
+    # memory entry here used to cost O(N log N) expensive similarity computations.
+    relevant_candidates = []
+    for item in candidates:
+        source_term = item.get("source_text") or ""
+        if not source_term:
+            continue
+        normalized_term = _normalize_match_text(source_term)
+        compact_term = _normalize_memory_lookup_key(source_term)
+        if (
+            normalized_term in normalized_source
+            or (compact_term and compact_term in compact_source)
+            or (len(source_term) >= 2 and (
+                source_term in source_text
+                or _contains_candidate_tokens(source_text, source_term)
+            ))
+        ):
+            relevant_candidates.append(item)
     ranked_candidates = sorted(
-        candidates,
+        relevant_candidates,
         key=lambda item: _memory_candidate_priority(source_text, item["source_text"]),
         reverse=True,
     )
@@ -3989,6 +4157,48 @@ def _build_translation_stats_payload(db: Session, batch_id: str | None):
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
                           db: Session, bank: str = None, memory_file_ids=None, memory_file_id: int = None,
                           allow_partial: bool = True) -> tuple:
+    """Translate via memory with a per-task result cache (duplicate segments are common)."""
+    cache = getattr(_thread_locals, "memory_lookup_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_locals.memory_lookup_cache = cache
+    normalized_file_ids = tuple(_normalize_memory_file_ids(
+        memory_file_ids=memory_file_ids, memory_file_id=memory_file_id
+    ))
+    cache_key = (content, bool(allow_partial), source_lang, target_lang, bank or "", normalized_file_ids)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        result, hit, qualified, used, trace_snapshot = cached
+        _thread_locals.last_memory_hit_stats_qualified = qualified
+        _thread_locals.memory_used_for_translation = used
+        if trace_snapshot:
+            trace = getattr(_thread_locals, "memory_match_trace", None)
+            if trace is None:
+                trace = []
+                _thread_locals.memory_match_trace = trace
+            trace.extend(trace_snapshot)
+        return result, hit
+
+    trace_start = len(getattr(_thread_locals, "memory_match_trace", None) or [])
+    result, hit = _translate_with_memory_uncached(
+        content, source_lang, target_lang, db,
+        bank=bank, memory_file_ids=memory_file_ids,
+        memory_file_id=memory_file_id, allow_partial=allow_partial,
+    )
+    trace_snapshot = list(getattr(_thread_locals, "memory_match_trace", None) or [])[trace_start:]
+    cache[cache_key] = (
+        result,
+        hit,
+        bool(getattr(_thread_locals, "last_memory_hit_stats_qualified", False)),
+        bool(getattr(_thread_locals, "memory_used_for_translation", False)),
+        trace_snapshot,
+    )
+    return result, hit
+
+
+def _translate_with_memory_uncached(content: str, source_lang: str, target_lang: str,
+                                    db: Session, bank: str = None, memory_file_ids=None, memory_file_id: int = None,
+                                    allow_partial: bool = True) -> tuple:
     bundle = _get_memory_candidate_bundle(
         db,
         source_lang,
@@ -4124,8 +4334,18 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
     _reset_translation_usage_stats()
     try:
         started_at = time.perf_counter()
+        timeout_seconds = _translation_task_timeout_seconds()
+        _set_current_translation_doc(doc_id, deadline=time.monotonic() + timeout_seconds)
         with _translate_tasks_lock:
-            _translate_tasks[doc_id] = {"status": "processing", "error": None}
+            _translate_tasks[doc_id] = {
+                "status": "processing",
+                "error": None,
+                "stage": "preparing",
+                "progress": 0.0,
+                "started_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        _set_translation_progress("preparing", 0)
 
         source_lang = _resolve_source_language(source_lang, target_lang, file_path=file_path, ext=ext)
         _ensure_translation_direction(source_lang, target_lang)
@@ -4145,6 +4365,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 
         all_original_parts = []
         all_translated_parts = []
+        _set_translation_progress("translating", 5)
 
         if ext == ".zip":
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -4319,6 +4540,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 
         original_content = "\n\n".join(all_original_parts)
         translated_content = "\n\n".join(all_translated_parts)
+        _set_translation_progress("saving", 95)
 
         doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
         if doc:
@@ -4346,14 +4568,20 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 
     except Exception as e:
         error_msg = str(e)
+        canceled = isinstance(e, TranslationCancelled)
         doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
         if doc:
-            doc.translated_filename = f"ERROR:{error_msg[:200]}"
+            prefix = CANCELED_TRANSLATION_PREFIX if canceled else "ERROR:"
+            doc.translated_filename = f"{prefix}{error_msg[:200]}"
             db.commit()
             _clear_translation_stats_cache(doc.batch_id)
         with _translate_tasks_lock:
-            _translate_tasks[doc_id] = {"status": "error", "error": error_msg}
+            _translate_tasks[doc_id] = {
+                "status": "canceled" if canceled else "error",
+                "error": error_msg,
+            }
     finally:
+        _set_current_translation_doc(None, deadline=None)
         db.close()
 
 
@@ -4616,11 +4844,29 @@ async def get_translate_file_status(
         task = _translate_tasks.get(doc_id)
 
     if task:
+        stage = task.get("stage")
+        progress = task.get("progress")
+        if task.get("status") == "processing":
+            reference = _task_started_at(task) or doc.created_at
+            if reference and datetime.utcnow() - reference > timedelta(seconds=_translation_task_timeout_seconds()):
+                # An in-memory "processing" flag must not hide a stuck background thread forever.
+                error_msg = f"翻译任务超时（超过 {_translation_task_timeout_seconds() // 60} 分钟），请拆分文档后重试"
+                with _translate_tasks_lock:
+                    current = _translate_tasks.get(doc_id)
+                    if current is None or current.get("status") == "processing":
+                        _translate_tasks[doc_id] = {"status": "error", "error": error_msg}
+                if not str(doc.translated_filename or "").startswith("ERROR:"):
+                    doc.translated_filename = f"ERROR:{error_msg[:200]}"
+                    db.commit()
+                    _clear_translation_stats_cache(doc.batch_id)
+                return _status_payload(status="error", error=error_msg)
         return _status_payload(
             status=task["status"],
             error=task.get("error"),
             translated_filename=task.get("translated_filename", ""),
             download_url=f"/api/translation/download/{doc_id}" if task["status"] == "completed" else None,
+            stage=stage,
+            progress=progress,
         )
 
     if fn == "":
