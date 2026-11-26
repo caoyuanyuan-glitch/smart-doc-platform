@@ -3253,11 +3253,66 @@ def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, targe
     return out_buf.read(), all_original, all_translated
 
 
-def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
-    """Translate XLSX preserving all formatting, formulas, and structure."""
+_XLSX_INLINE_RPR_RE = re.compile(
+    r"(<(?:[A-Za-z_][\w.-]*:)?rPr\b[^>]*>)(.*?)(</(?:[A-Za-z_][\w.-]*:)?rPr>)",
+    re.DOTALL,
+)
+
+
+def _sanitize_xlsx_inline_font_xml(raw: bytes):
+    """Convert WPS-style <name val=.../> inside rich-text rPr to OOXML <rFont>.
+
+    openpyxl's InlineFont does not accept a `name` attribute, so files produced by
+    WPS that put font names inside sharedStrings/worksheet inline text fail to load.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, raw
+    if "<rPr" not in text or "<name" not in text:
+        return False, raw
+
+    def replace_block(match):
+        block = match.group(2)
+        block = re.sub(r"<(name)(?=[\s/>])", "<rFont", block)
+        block = re.sub(r"</name\s*>", "</rFont>", block)
+        return match.group(1) + block + match.group(3)
+
+    cleaned = _XLSX_INLINE_RPR_RE.sub(replace_block, text)
+    if cleaned == text:
+        return False, raw
+    return True, cleaned.encode("utf-8")
+
+
+def _load_xlsx_workbook_compat(fpath: str):
+    """Load a workbook, transparently repairing WPS inline-font markup."""
     from openpyxl import load_workbook
 
-    wb = load_workbook(fpath)
+    try:
+        return load_workbook(fpath)
+    except TypeError as exc:
+        message = str(exc)
+        if "InlineFont" not in message or "name" not in message:
+            raise
+
+    repaired = io.BytesIO()
+    changed = False
+    with zipfile.ZipFile(fpath, "r") as z_in, zipfile.ZipFile(repaired, "w", zipfile.ZIP_DEFLATED) as z_out:
+        for info in z_in.infolist():
+            raw = z_in.read(info.filename)
+            if info.filename.endswith(".xml"):
+                did_change, raw = _sanitize_xlsx_inline_font_xml(raw)
+                changed = changed or did_change
+            z_out.writestr(info, raw)
+    if not changed:
+        raise
+    repaired.seek(0)
+    return load_workbook(repaired)
+
+
+def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate XLSX preserving all formatting, formulas, and structure."""
+    wb = _load_xlsx_workbook_compat(fpath)
     all_original = []
     all_translated = []
     text_indexes = {}

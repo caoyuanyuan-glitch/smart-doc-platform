@@ -44,21 +44,6 @@ def normalize_tm_csv(src: Path, dst: Path):
     return dst
 
 
-def sanitize_xlsx(src: Path, dst: Path):
-    """Fix WPS-style <name val=.../> font tags that openpyxl cannot parse."""
-    import zipfile
-
-    with zipfile.ZipFile(src, "r") as z_in, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z_out:
-        for info in z_in.infolist():
-            raw = z_in.read(info.filename)
-            if info.filename in ("xl/sharedStrings.xml", "xl/styles.xml"):
-                text = raw.decode("utf-8", errors="replace")
-                text = text.replace("<name val=", "<rFont val=")
-                raw = text.encode("utf-8")
-            z_out.writestr(info, raw)
-    return dst
-
-
 def mock_one(text: str) -> str:
     ascii_only = re.sub(r"[^\x00-\x7F]", lambda m: f"U{ord(m.group()):04X}", text or "")
     return f"[mock-en] {ascii_only}"
@@ -99,8 +84,6 @@ def main():
     results = []
     for ext, path, func in FILES:
         input_path = path
-        if ext == "xlsx":
-            input_path = sanitize_xlsx(path, OUT_DIR / "input_xlsx_sanitized.xlsx")
         t._reset_translation_usage_stats()
         t._set_memory_bank("user-test-bank")
         t._set_memory_file_ids(memory_file_ids=[1, 2])
