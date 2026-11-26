@@ -123,6 +123,10 @@
               <div v-if="job.status === 'submitting' || job.status === 'processing'" class="result-loading result-loading-inline">
                 <div class="loading-spinner"></div>
                 <p>{{ job.status === 'submitting' ? '正在提交翻译任务...' : `正在翻译... (${job.pollingCount}s)` }}</p>
+                <div v-if="job.status === 'processing'" class="translation-progress">
+                  <el-progress :percentage="Number(job.progress || 0)" :stroke-width="8" />
+                  <span class="translation-stage">{{ stageLabel(job.stage) }}</span>
+                </div>
                 <el-button v-if="job.doc_id && job.status === 'processing'" class="stop-job-btn" type="warning" plain @click="cancelTranslationJob(job)">
                   停止翻译
                 </el-button>
@@ -522,6 +526,20 @@ function startPolling(jobKey, docId) {
         return
       }
 
+      updateJob(jobKey, {
+        stage: statusData.stage || '',
+        progress: Number(statusData.progress || 0)
+      })
+
+      // Safety net: backend deadline is 5 minutes by default; stop polling shortly after.
+      if ((currentJob.pollingCount || 0) >= 8 * 60) {
+        stopPolling(jobKey)
+        const timeoutMessage = '翻译任务超时，请拆分文档后重试'
+        updateJob(jobKey, { status: 'error', error: timeoutMessage })
+        ElMessage.error(timeoutMessage)
+        return
+      }
+
       const timer = window.setTimeout(pollOnce, 3000)
       pollingTimers.set(jobKey, timer)
     } catch (e) {
@@ -548,6 +566,15 @@ function statusTagType(status) {
   if (status === 'canceled') return 'warning'
   if (status === 'error') return 'danger'
   return 'info'
+}
+
+function stageLabel(stage) {
+  const labels = {
+    preparing: '准备中',
+    translating: '翻译中（记忆库匹配 + AI 补全）',
+    saving: '保存结果中'
+  }
+  return labels[stage] || '处理中'
 }
 
 function statusLabel(job) {
@@ -838,6 +865,18 @@ async function openTranslatedPreview(job) {
 
 .stop-job-btn {
   margin-top: 12px;
+}
+
+.translation-progress {
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.translation-stage {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .loading-spinner {
