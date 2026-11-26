@@ -3146,6 +3146,43 @@ def _collect_docx_container_paragraphs(container, paragraphs_to_translate):
                 _collect_docx_container_paragraphs(cell, paragraphs_to_translate)
 
 
+_WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_HEADER_FOOTER_PART_RE = re.compile(r"/word/(header|footer)\d*\.xml$")
+_DOCX_PAGE_NUMBER_ONLY_RE = re.compile(r"^[0-9IVXLCDMivxlcdm\s\-./]+$")
+
+
+def _docx_header_footer_xml_paragraphs(doc):
+    """Yield header/footer paragraphs, including text boxes missed by python-docx."""
+    for part in doc.part.package.parts:
+        part_name = str(getattr(part, "partname", "") or "")
+        if not _DOCX_HEADER_FOOTER_PART_RE.search(part_name):
+            continue
+        element = getattr(part, "element", None)
+        if element is None:
+            continue
+        for para in element.iter(f"{_WORD_NS}p"):
+            text_nodes = list(para.iter(f"{_WORD_NS}t"))
+            if not text_nodes:
+                continue
+            text = "".join(node.text or "" for node in text_nodes)
+            if not text.strip():
+                continue
+            # PAGE/NUMPAGES fields and page numbers are not translatable content.
+            if any(True for _ in para.iter(f"{_WORD_NS}instrText")) or any(True for _ in para.iter(f"{_WORD_NS}fldChar")):
+                continue
+            if _DOCX_PAGE_NUMBER_ONLY_RE.fullmatch(text.strip()):
+                continue
+            yield part_name, para, text_nodes, text
+
+
+def _apply_translated_text_to_docx_xml_paragraph(text_nodes, translated: str):
+    if not text_nodes:
+        return
+    text_nodes[0].text = translated
+    for node in text_nodes[1:]:
+        node.text = ""
+
+
 def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
     """Translate DOCX preserving formatting (paragraphs, runs, tables, headers, footers)."""
     from docx import Document
@@ -3177,6 +3214,7 @@ def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, targe
         ]:
             add_container(container)
 
+    known_translations = {}
     texts = [p.text for p in paragraphs_to_translate]
     if texts:
         translated_texts = _translate_text_items(texts, engine, model, source_lang, target_lang, db)
@@ -3185,7 +3223,29 @@ def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, targe
                 translated = translated_texts[i]
                 all_original.append(texts[i])
                 all_translated.append(translated)
+                known_translations[texts[i]] = translated
                 _apply_translated_text_to_docx_paragraph(para, translated)
+
+    # Text boxes in headers/footers are not exposed by python-docx's paragraph API.
+    # Translate them from the raw story XML so no visible header/footer text is missed.
+    header_footer_entries = list(_docx_header_footer_xml_paragraphs(doc))
+    missing_texts = []
+    seen_missing = set()
+    for _, _, _, text in header_footer_entries:
+        if text not in known_translations and text not in seen_missing:
+            seen_missing.add(text)
+            missing_texts.append(text)
+    missing_translations = {}
+    if missing_texts:
+        translated_missing = _translate_text_items(missing_texts, engine, model, source_lang, target_lang, db)
+        missing_translations = dict(zip(missing_texts, translated_missing))
+        known_translations.update(missing_translations)
+
+    for part_name, _, text_nodes, text in header_footer_entries:
+        translated = known_translations.get(text, text)
+        _apply_translated_text_to_docx_xml_paragraph(text_nodes, translated)
+        all_original.append(text)
+        all_translated.append(translated)
 
     out_buf = io.BytesIO()
     doc.save(out_buf)
