@@ -2,7 +2,7 @@
   <el-drawer
     v-model="drawerVisible"
     title="管理问答卡片"
-    size="640px"
+    size="min(640px, 100%)"
     @open="loadCards"
   >
     <div class="manager-body">
@@ -40,7 +40,7 @@
     <el-dialog
       v-model="formVisible"
       :title="editingId ? '编辑卡片' : '新建卡片'"
-      width="620px"
+      width="min(620px, 92vw)"
       append-to-body
       destroy-on-close
     >
@@ -474,5 +474,26 @@ async function removeCard(card) {
 .folder-tree {
   max-height: 280px;
   overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .manager-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .card-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .card-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
