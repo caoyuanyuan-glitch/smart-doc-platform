@@ -39,6 +39,10 @@ export function getAPIErrorMessage(error, fallback = '请求失败') {
   if (Array.isArray(detail)) return detail.map(item => item.msg || JSON.stringify(item)).join('; ')
   if (detail) return JSON.stringify(detail)
   if (error?.response?.status) return `${fallback} (HTTP ${error.response.status})`
+  if (error?.code === 'ECONNABORTED') return '请求超时，请稍后重试'
+  if (!error?.response && (error?.message === 'Network Error' || error?.code === 'ERR_NETWORK')) {
+    return '网络中断，文件未送达服务器。请刷新页面确认已登录后重试'
+  }
   return error?.message || fallback
 }
 
@@ -145,12 +149,16 @@ export const reviewAPI = {
   createSnippet: (payload) => instance.post('/review/snippet', payload, { timeout: 300000 }),
   compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
     const formData = new FormData()
-    formData.append('main_file', mainFile)
+    const appendFile = (field, file) => {
+      const raw = file?.raw || file
+      const filename = raw?.name || file?.name || 'upload.bin'
+      formData.append(field, raw, filename)
+    }
+    appendFile('main_file', mainFile)
     formData.append('mode', mode)
-    referenceFiles.forEach((file) => formData.append('reference_files', file))
+    referenceFiles.forEach((file) => appendFile('reference_files', file))
     return instance.post('/review/compare-audit/run', formData, {
-      timeout: 300000,
-      headers: { 'Content-Type': 'multipart/form-data' }
+      timeout: 300000
     })
   },
   get: (id) => instance.get(`/review/${id}`),
