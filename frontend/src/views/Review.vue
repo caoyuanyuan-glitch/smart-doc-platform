@@ -199,8 +199,13 @@
               <span class="review-mode-label">对比模式</span>
               <el-radio-group v-model="compareMode" size="small">
                 <el-radio-button label="both">核心参数 + 主干流程</el-radio-button>
+                <el-radio-button label="bilingual">中英对照</el-radio-button>
               </el-radio-group>
-              <span class="review-mode-hint">按属性-值识别参数；中英各一份时同时对照章节序号、货号和数值。</span>
+              <span class="review-mode-hint">
+                {{ compareMode === 'bilingual'
+                  ? '中文主文档 + 英文参考文档成对比对：安全警示、数值单位、图表编号、章节结构；每条差异双向举证。'
+                  : '按属性-值识别参数；中英各一份时自动追加目录章节对照。' }}
+              </span>
             </div>
 
             <div class="compare-action-row">
@@ -250,10 +255,45 @@
                   : '当前默认只展示差异项，便于直接处理高优先级问题。' }}
               </div>
               <el-switch v-model="showCompareConsistent" active-text="显示一致项" inactive-text="隐藏一致项" />
+              <el-radio-group v-if="compareMode === 'bilingual'" v-model="compareView" size="small" class="compare-view-switch">
+                <el-radio-button label="table">明细表</el-radio-button>
+                <el-radio-button label="side">并排对照</el-radio-button>
+              </el-radio-group>
             </div>
 
-            <div v-if="compareResult.summary?.bilingual" class="compare-result-block">
-              <h4>中英对照明细表</h4>
+            <!-- 中英并排对照：句对级展示，差异句高亮，参考平台对比模块 -->
+            <div v-if="compareMode === 'bilingual' && compareView === 'side'" class="bilingual-side-by-side">
+              <div class="bl-head">
+                <div class="bl-col">{{ compareResult.main_document?.filename || '中文文档' }}</div>
+                <div class="bl-col">{{ compareResult.reference_documents?.[0]?.filename || '英文文档' }}</div>
+              </div>
+              <div class="bl-body">
+                <div
+                  v-for="(pair, idx) in visibleSegmentPairs"
+                  :key="'sp-' + idx"
+                  class="bl-row"
+                  :class="{ 'bl-diff': pair.status === 'diff' }"
+                >
+                  <div class="bl-cell">
+                    <span class="bl-line">{{ pair.cn_line }}</span>
+                    <span class="bl-text">{{ pair.cn }}</span>
+                  </div>
+                  <div class="bl-cell">
+                    <span class="bl-line">{{ pair.en_line }}</span>
+                    <span class="bl-text">{{ pair.en }}</span>
+                  </div>
+                </div>
+                <el-empty v-if="!visibleSegmentPairs.length" description="未生成句对对照数据" />
+              </div>
+              <div class="bl-status">
+                共 {{ compareResult.segment_pairs?.length || 0 }} 组句对，其中
+                {{ (compareResult.segment_pairs || []).filter(p => p.status === 'diff').length }} 组存在差异；红色为差异句。
+              </div>
+            </div>
+
+            <!-- 目录章节对照：both 模式自动识别中英时也会出现 -->
+            <div v-if="visibleBilingualCompareRows.length" class="compare-result-block">
+              <h4>目录章节对照表</h4>
               <div class="compare-table-wrap">
                 <el-table :data="visibleBilingualCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
                   <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
@@ -286,8 +326,8 @@
               </div>
             </div>
 
-            <div class="compare-result-block">
-              <h4>核心参数差异明细表</h4>
+            <div class="compare-result-block" v-show="!(compareMode === 'bilingual' && compareView === 'side')">
+              <h4>{{ compareMode === 'bilingual' ? '中英对照差异明细表' : '核心参数差异明细表' }}</h4>
               <div class="compare-table-wrap">
                 <el-table :data="visibleParamCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
                   <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
@@ -314,6 +354,11 @@
                         <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
                         <span>{{ scope.row.conclusion }}</span>
                       </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="compareMode === 'bilingual'" label="双向举证" width="320" show-overflow-tooltip>
+                    <template #default="scope">
+                      <span>{{ scope.row.evidence || '-' }}</span>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -1848,6 +1893,7 @@ const canClearSnippet = computed(() => {
   return Boolean(String(snippetText.value || '').trim() || snippetReviewState.value)
 })
 const compareMode = ref('both')
+const compareView = ref('table')
 const compareSubmitting = ref(false)
 const compareResult = ref(null)
 const showCompareConsistent = ref(false)
@@ -1879,6 +1925,13 @@ const compareReferenceColumns = computed(() => {
   if (documents.length) return documents
   const firstRow = compareResult.value?.compare_rows?.[0]
   return firstRow?.reference_values || []
+})
+
+// 中英句对对照：默认只显示差异句；开关打开后显示全部句对
+const visibleSegmentPairs = computed(() => {
+  const pairs = compareResult.value?.segment_pairs || []
+  if (showCompareConsistent.value) return pairs
+  return pairs.filter((pair) => pair.status === 'diff')
 })
 
 watch(reviewSubTab, (tab) => {
@@ -2583,6 +2636,7 @@ async function startCompareAudit() {
   try {
     const response = await reviewAPI.compareAudit(compareMainFile.value, compareReferenceFiles.value, compareMode.value)
     showCompareConsistent.value = false
+    compareView.value = 'table'
     compareResult.value = response.data
     await loadReviews()
     await loadDocuments()
@@ -3105,8 +3159,7 @@ function reviewModeLabel(mode) {
     hybrid: '完整审核',
     ai: 'AI审核',
     'compare:both': '对比审核',
-    'compare:numbers': '对比审核',
-    'compare:steps': '对比审核',
+    'compare:bilingual': '中英对照审核',
     'snippet:rule': '文本片段审核',
     'snippet:hybrid': '文本片段审核'
   }[mode] || mode || '-'
@@ -4437,6 +4490,102 @@ onUnmounted(() => {
 
 .compare-main-value {
   color: #1f2937;
+}
+
+.compare-view-switch {
+  margin-left: auto;
+}
+
+/* 中英句对并排对照（参考平台对比模块的双栏布局） */
+.bilingual-side-by-side {
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+  margin-bottom: 16px;
+}
+
+.bl-head,
+.bl-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.bl-head {
+  background: #f5f7fa;
+  font-weight: 500;
+  font-size: 13px;
+  color: #303133;
+  border-bottom: 1px solid #dcdfe6;
+}
+
+.bl-head .bl-col {
+  padding: 10px 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bl-head .bl-col + .bl-col {
+  border-left: 1px solid #dcdfe6;
+}
+
+.bl-body {
+  max-height: 620px;
+  overflow-y: auto;
+}
+
+.bl-row {
+  border-bottom: 1px solid #ebeef5;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.bl-row:last-child {
+  border-bottom: none;
+}
+
+.bl-row.bl-diff {
+  background: #fef0f0;
+}
+
+.bl-cell {
+  display: flex;
+  gap: 10px;
+  padding: 8px 14px;
+  word-break: break-word;
+}
+
+.bl-cell + .bl-cell {
+  border-left: 1px solid #ebeef5;
+}
+
+.bl-row.bl-diff .bl-cell + .bl-cell {
+  border-left-color: #fbc4c4;
+}
+
+.bl-line {
+  flex: 0 0 42px;
+  color: #909399;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.bl-row.bl-diff .bl-line {
+  color: #f56c6c;
+}
+
+.bl-text {
+  flex: 1;
+  color: #303133;
+}
+
+.bl-status {
+  padding: 8px 14px;
+  background: #f5f7fa;
+  border-top: 1px solid #dcdfe6;
+  font-size: 12px;
+  color: #606266;
 }
 
 .progress-section {

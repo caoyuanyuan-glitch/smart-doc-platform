@@ -52,18 +52,20 @@ from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.services.terminology import load_terminology, resolve_terminology_path, run_term_check_v2
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.review_engine.unit_spacing import check_units_and_spacing
+from app.review_engine.bilingual_compare import detect_language as detect_bilingual_language
+from app.review_engine.bilingual_audit import run_bilingual_audit
 from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
 from app.review_engine.cn_typo import check_cn_typos
 from app.review_engine.learned_patch import check_learned_patches
 from app.review_engine.bilingual_align import (
-    bilingual_value_status,
-    bilingual_values_match,
-    build_bilingual_rows,
-    detect_doc_language,
+    bilingual_value_status as align_bilingual_value_status,
+    bilingual_values_match as align_bilingual_values_match,
+    build_bilingual_rows as build_bilingual_align_rows,
+    detect_doc_language as align_detect_doc_language,
     extract_flow_profile as extract_bilingual_flow_profile,
     is_bilingual_compare,
-    language_label,
+    language_label as align_language_label,
     summarize_flow_profile as summarize_bilingual_flow_profile,
 )
 from app.utils.ai_client import ai_client
@@ -15464,7 +15466,7 @@ COMPARE_PARAM_DEFINITIONS = [
     {"dimension": "联系与制造", "name": "制造商名称", "priority": "P1", "aliases": ["制造商", "制造商名称", "生产企业名称", "生产企业", "manufacturer", "manufacturername", "生产商", "公司名", "公司"]},
     {"dimension": "联系与制造", "name": "制造商地址", "priority": "P1", "aliases": ["制造商地址", "生产企业地址", "生产地址", "注册地址", "注册人住所", "总部地址", "manufactureraddress", "地址", "厂址", "住所"]},
 ]
-COMPARE_ALLOWED_MODES = {"both"}
+COMPARE_ALLOWED_MODES = {"both", "bilingual"}
 COMPARE_FLOW_SECTION_KEYWORDS = ("操作流程", "实验步骤", "操作步骤", "注意事项")
 COMPARE_STEP_PATTERN = re.compile(r"^(?:step\s*\d+\s*[:：\.-]?|\d+[\.)、]\s*|[一二三四五六七八九十]+[、.]\s*|[-*•]\s+)", re.IGNORECASE)
 COMPARE_JUNK_PARAM_VALUES = {
@@ -15606,7 +15608,7 @@ def _compare_values_match(value_a, value_b, bilingual=False):
     if _values_equal(left, right):
         return True
     if bilingual:
-        return bilingual_values_match(left, right)
+        return align_bilingual_values_match(left, right)
     return False
 
 
@@ -15633,7 +15635,7 @@ def _resolve_compare_row_level(field_def, main_value, reference_summary, bilingu
     if matched_values:
         return "P2", "主文档与少量参考文件一致，但参照物之间存在多个版本，请确认最终版本。"
     if bilingual:
-        statuses = [bilingual_value_status(main_value, value) for value in reference_values]
+        statuses = [align_bilingual_value_status(main_value, value) for value in reference_values]
         if statuses and all(status == "translation" for status in statuses):
             return "P2", "中英表述不同，未检出可对齐的货号或数值，请人工确认译名是否对应。"
         if statuses and all(status == "match" for status in statuses):
@@ -15811,47 +15813,78 @@ def _compare_level_order(level):
 
 
 def _build_compare_audit_payload(main_doc, reference_docs, mode):
-    bilingual = is_bilingual_compare(
-        main_doc.get("text") or "",
-        [doc.get("text") or "" for doc in reference_docs],
-    )
-    compare_rows = _build_compare_param_rows(main_doc, reference_docs, bilingual=bilingual)
-    compare_rows.append(_build_compare_flow_row(main_doc, reference_docs, bilingual=bilingual))
-    if bilingual:
-        compare_rows.extend(build_bilingual_rows(main_doc, reference_docs, enable_ai=False))
+    main_text = main_doc.get("text") or ""
+    reference_texts = [doc.get("text") or "" for doc in reference_docs]
+    auto_bilingual = is_bilingual_compare(main_text, reference_texts)
+    bilingual_segment_pairs: list = []
+    if mode == "bilingual":
+        # 四层管道：句对对齐 + 确定性比对 + 语义判定（LLM 可用时）+ 三道硬闸。
+        # LLM 不可用时自动只跑确定性层，不阻塞审核。
+        llm_call = None
+        if ai_client.deepseek_client is not None:
+            def llm_call(messages):
+                result = ai_client.chat_with_provider(
+                    "deepseek", messages, temperature=0, request_label="bilingual-semantic"
+                )
+                if isinstance(result, dict):
+                    return result.get("content") or result.get("text") or ""
+                return str(result or "")
+        audit = run_bilingual_audit(main_doc, reference_docs, llm=llm_call)
+        compare_rows = audit["rows"]
+        bilingual_segment_pairs = audit.get("segment_pairs") or []
+        # 四层管道之外补目录级对齐：一侧目录漏译时仍能报 P1。
+        compare_rows.extend(build_bilingual_align_rows(main_doc, reference_docs, toc_only=True))
+        bilingual_active = True
+    elif auto_bilingual:
+        # 未显式选模式时，中英各一份自动追加目录对照。
+        compare_rows = _build_compare_param_rows(main_doc, reference_docs, bilingual=True)
+        compare_rows.append(_build_compare_flow_row(main_doc, reference_docs, bilingual=True))
+        compare_rows.extend(build_bilingual_align_rows(main_doc, reference_docs, enable_ai=False))
+        bilingual_active = True
+    else:
+        compare_rows = _build_compare_param_rows(main_doc, reference_docs)
+        compare_rows.append(_build_compare_flow_row(main_doc, reference_docs))
+        bilingual_active = False
     compare_rows = sorted(compare_rows, key=lambda row: (_compare_level_order(row.get("level")), row.get("dimension"), row.get("parameter_name")))
     summary_counts = Counter(row.get("level") for row in compare_rows)
-    main_lang = detect_doc_language(main_doc.get("text") or "")
+    main_lang = align_detect_doc_language(main_text)
     return {
         "main_document": {
             "filename": main_doc["filename"],
-            "char_count": len(main_doc.get("text") or ""),
+            "char_count": len(main_text),
             "language": main_lang,
-            "language_label": language_label(main_lang),
+            "language_label": align_language_label(main_lang),
         },
         "reference_documents": [
             {
                 "filename": doc["filename"],
                 "char_count": len(doc.get("text") or ""),
-                "language": detect_doc_language(doc.get("text") or ""),
-                "language_label": language_label(detect_doc_language(doc.get("text") or "")),
+                "language": align_detect_doc_language(doc.get("text") or ""),
+                "language_label": align_language_label(align_detect_doc_language(doc.get("text") or "")),
             }
             for doc in reference_docs
         ],
         "summary": {
             "mode": mode,
             "reference_count": len(reference_docs),
-            "bilingual": bilingual,
+            "bilingual": bilingual_active,
             "main_language": main_lang,
-            "main_language_label": language_label(main_lang),
+            "main_language_label": align_language_label(main_lang),
             "p0_count": summary_counts.get("P0", 0),
             "p1_count": summary_counts.get("P1", 0),
             "p2_count": summary_counts.get("P2", 0),
             "match_count": summary_counts.get("一致", 0),
             "total_issue_count": summary_counts.get("P0", 0) + summary_counts.get("P1", 0) + summary_counts.get("P2", 0),
             "row_count": len(compare_rows),
+            "pair_languages": {
+                "main": detect_bilingual_language(main_text),
+                "references": [detect_bilingual_language(text) for text in reference_texts],
+            },
+            "bilingual_row_count": len([row for row in compare_rows if str(row.get("kind") or "").startswith("bilingual_")]),
+            "toc_row_count": len([row for row in compare_rows if row.get("kind") == "bilingual"]),
         },
         "compare_rows": compare_rows,
+        "segment_pairs": bilingual_segment_pairs,
     }
 
 
@@ -15879,32 +15912,24 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             f"{item.get('filename') or '参考文件'}：{item.get('value') or '-'}"
             for item in (row.get("reference_values") or [])
         ]
-        kind = row.get("kind")
-        if kind == "parameter":
-            category = "核心参数对比"
-            source = "compare_param"
-            audit_basis = "对比审核 - 核心参数差异明细表"
-        elif kind == "bilingual":
-            category = "中英对照"
-            source = "compare_bilingual"
-            audit_basis = "对比审核 - 中英对照明细表"
-        else:
-            category = "主干流程比对"
-            source = "compare_flow"
-            audit_basis = "对比审核 - 核心参数差异明细表"
+        kind = str(row.get('kind') or '')
+        is_bilingual = kind == 'bilingual' or kind.startswith('bilingual_')
+        context_lines = [f"主文档：{row.get('main_value') or '-'}", *reference_lines]
+        if is_bilingual and row.get('evidence'):
+            context_lines.append(f"双向举证：{row['evidence']}")
         payloads.append(IssueCreate(
             review_id=review_id,
             severity=severity_map.get(level, "general"),
-            category=category,
+            category='中英对照' if is_bilingual else ('核心参数对比' if kind == 'parameter' else '主干流程比对'),
             rule='',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
-            context="\n".join([f"主文档：{row.get('main_value') or '-'}", *reference_lines]),
-            suggestion='请以参考文件的稳定版本为准，核对主文档并完成修订。',
+            context="\n".join(context_lines),
+            suggestion='修改后须中↔英同步（R-E2），并在此条中同时给出两版位置。' if is_bilingual else '请以参考文件的稳定版本为准，核对主文档并完成修订。',
             description=str(row.get('conclusion') or '对比审核发现差异'),
-            audit_basis=audit_basis,
-            confidence=95,
-            source=source,
+            audit_basis='对比审核 - 中英对照差异明细表' if is_bilingual else '对比审核 - 核心参数差异明细表',
+            confidence=90 if is_bilingual else 95,
+            source='compare_bilingual' if is_bilingual else ('compare_param' if kind == 'parameter' else 'compare_flow'),
             position=_encode_issue_position_with_meta(0, 0, compare_type=row.get('kind'), compare_level=level, parameter_name=row.get('parameter_name')),
             status='pending',
         ))

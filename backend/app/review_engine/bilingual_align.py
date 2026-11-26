@@ -939,12 +939,22 @@ def opposite_language_docs(main_doc: dict, reference_docs: list[dict]) -> list[d
     return [doc for doc in reference_docs if detect_doc_language(doc.get("text") or "") == target]
 
 
-def build_bilingual_rows(main_doc: dict, reference_docs: list[dict], *, enable_ai: bool = False, chat_fn=None) -> list[dict]:
+def build_bilingual_rows(
+    main_doc: dict,
+    reference_docs: list[dict],
+    *,
+    enable_ai: bool = False,
+    chat_fn=None,
+    toc_only: bool = False,
+) -> list[dict]:
     peer_docs = opposite_language_docs(main_doc, reference_docs)
     if not peer_docs:
         return []
     rows = []
     named_rows = _named_section_rows(main_doc, peer_docs)
+    if toc_only:
+        # 显式中英对照模式只补目录级差异，其余维度交给四层管道。
+        return named_rows or []
     if named_rows:
         rows.extend(named_rows)
     else:
