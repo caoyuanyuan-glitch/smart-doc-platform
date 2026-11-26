@@ -69,18 +69,44 @@ CANCELED_TRANSLATION_PREFIX = "CANCELED:"
 
 
 def _translation_task_timeout_seconds() -> int:
-    """Hard deadline for a single document translation job (default: 30 minutes)."""
+    """Hard deadline for one document job.
+
+    The original code had no task deadline at all; the only effective timeouts were
+    per-AI-call network timeouts (~60 s read, 1 attempt per provider, up to 5 providers
+    plus a Kimi retry), so a single AI batch could already burn ~7 minutes. A whole
+    document was unbounded. 5 minutes is enough for a healthy batch and surfaces
+    failures far earlier than the 30 minutes users were observing.
+    """
     try:
-        configured = float(os.getenv("TRANSLATION_TASK_TIMEOUT_MINUTES", "30") or 30)
+        configured = float(os.getenv("TRANSLATION_TASK_TIMEOUT_MINUTES", "5") or 5)
     except (TypeError, ValueError):
-        configured = 30.0
+        configured = 5.0
     return int(max(1, configured) * 60)
+
+
+def _translation_task_stall_timeout_seconds() -> int:
+    """Fail a job whose progress has not moved for this long (default: 2 minutes)."""
+    try:
+        configured = float(os.getenv("TRANSLATION_TASK_STALL_TIMEOUT_SECONDS", "120") or 120)
+    except (TypeError, ValueError):
+        configured = 120.0
+    return int(max(30, configured))
 
 
 def _task_started_at(task):
     raw = (task or {}).get("started_at")
     if not raw:
         return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_updated_at(task):
+    raw = (task or {}).get("updated_at")
+    if not raw:
+        return _task_started_at(task)
     try:
         return datetime.fromisoformat(raw)
     except (TypeError, ValueError):
@@ -4931,10 +4957,20 @@ async def get_translate_file_status(
         stage = task.get("stage")
         progress = task.get("progress")
         if task.get("status") == "processing":
-            reference = _task_started_at(task) or doc.created_at
-            if reference and datetime.utcnow() - reference > timedelta(seconds=_translation_task_timeout_seconds()):
-                # An in-memory "processing" flag must not hide a stuck background thread forever.
-                error_msg = f"翻译任务超时（超过 {_translation_task_timeout_seconds() // 60} 分钟），请拆分文档后重试"
+            now = datetime.utcnow()
+            started = _task_started_at(task) or doc.created_at
+            updated = _task_updated_at(task)
+            total_timeout = _translation_task_timeout_seconds()
+            stall_timeout = _translation_task_stall_timeout_seconds()
+            stalled = bool(updated and now - updated > timedelta(seconds=stall_timeout))
+            expired = bool(started and now - started > timedelta(seconds=total_timeout))
+            if stalled or expired:
+                # A stuck thread must not keep the frontend in "processing" forever.
+                error_msg = (
+                    f"翻译停滞超过 {stall_timeout // 60} 分钟，已自动终止，请重试或拆分文档"
+                    if stalled
+                    else f"翻译任务超时（超过 {total_timeout // 60} 分钟），请拆分文档后重试"
+                )
                 with _translate_tasks_lock:
                     current = _translate_tasks.get(doc_id)
                     if current is None or current.get("status") == "processing":

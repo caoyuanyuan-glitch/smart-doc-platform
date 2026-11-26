@@ -531,8 +531,8 @@ function startPolling(jobKey, docId) {
         progress: Number(statusData.progress || 0)
       })
 
-      // Safety net: never poll forever if the backend dies without updating state.
-      if ((currentJob.pollingCount || 0) >= 42 * 60) {
+      // Safety net: backend deadline is 5 minutes by default; stop polling shortly after.
+      if ((currentJob.pollingCount || 0) >= 8 * 60) {
         stopPolling(jobKey)
         const timeoutMessage = '翻译任务超时，请拆分文档后重试'
         updateJob(jobKey, { status: 'error', error: timeoutMessage })
