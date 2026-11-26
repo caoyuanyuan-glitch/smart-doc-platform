@@ -4,18 +4,34 @@ Run from the backend directory:
     python benchmark_memory_matching.py
 """
 
+import importlib
 import os
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.api import translation as optimized  # noqa: E402
-from app.api import translation_legacy as legacy  # noqa: E402
+
+# Materialize the pre-optimization version from git so the comparison is reproducible
+# without keeping a duplicate 5000-line module in the repository.
+LEGACY_MODULE = "app.api._benchmark_legacy_translation"
+LEGACY_PATH = BACKEND_ROOT / "app" / "api" / "_benchmark_legacy_translation.py"
+_legacy_created = False
+if not LEGACY_PATH.exists():
+    source = subprocess.run(
+        ["git", "show", "62002fd:backend/app/api/translation.py"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    ).stdout
+    LEGACY_PATH.write_text(source, encoding="utf-8")
+    _legacy_created = True
+legacy = importlib.import_module(LEGACY_MODULE)
 
 
 TOPICS = [
@@ -79,6 +95,8 @@ def main():
     legacy_ms = run(legacy, entries, queries, "legacy")
     optimized_ms = run(optimized, entries, queries, "optimized")
     print(f"\nspeedup: {legacy_ms / max(optimized_ms, 0.001):.1f}x")
+    if _legacy_created:
+        LEGACY_PATH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

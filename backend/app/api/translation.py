@@ -537,6 +537,14 @@ def _record_traced_memory_usage(text: str):
         _record_translation_usage("memory", text)
 
 
+# Bundles are expensive to build. Keep a small, TTL-bounded process-wide cache so
+# consecutive documents using the same memory library do not reparse everything.
+_memory_bundle_global_cache = {}
+_memory_bundle_global_lock = threading.Lock()
+_MEMORY_BUNDLE_GLOBAL_TTL_SECONDS = 300
+_MEMORY_BUNDLE_GLOBAL_MAX_ENTRIES = 8
+
+
 def _get_memory_candidate_cache():
     cache = getattr(_thread_locals, "memory_candidate_cache", None)
     if cache is None:
@@ -546,6 +554,14 @@ def _get_memory_candidate_cache():
 
 
 def _clear_memory_candidate_cache(memory_file_id: int | None = None):
+    with _memory_bundle_global_lock:
+        if memory_file_id is None:
+            _memory_bundle_global_cache.clear()
+        else:
+            for cache_key in list(_memory_bundle_global_cache):
+                if memory_file_id in cache_key:
+                    _memory_bundle_global_cache.pop(cache_key, None)
+
     cache = getattr(_thread_locals, "memory_candidate_cache", None)
     if cache is None:
         return
@@ -1595,34 +1611,46 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
         unmatched_meta.append((index, leading, trailing, segment))
 
     if unmatched_segments:
-        for group in _build_unmatched_groups(unmatched_segments):
-            _check_translation_abort()
-            group_texts = [unmatched_segments[idx] for idx in group]
-            batched_translations = None
-            if len(group_texts) > 1:
-                separator = _build_batch_separator(group_texts)
-                try:
-                    batched_translations = _split_batched_translation_output(
-                        translate_with_ai(
-                            separator.join(group_texts),
-                            model,
-                            source_lang,
-                            target_lang,
-                            batch_separator=separator,
-                        ),
-                        separator,
-                        len(group_texts),
-                        "hybrid_batched_translation_split_mismatch",
-                    )
-                except Exception:
-                    batched_translations = None
+        groups = _build_unmatched_groups(unmatched_segments)
 
+        def _translate_group(group):
+            """Runs only translate_with_ai in a worker (no DB/session access)."""
+            group_texts = [unmatched_segments[idx] for idx in group]
+            if len(group_texts) == 1:
+                return [translate_with_ai(group_texts[0], model, source_lang, target_lang)]
+            separator = _build_batch_separator(group_texts)
+            try:
+                return list(_split_batched_translation_output(
+                    translate_with_ai(
+                        separator.join(group_texts),
+                        model,
+                        source_lang,
+                        target_lang,
+                        batch_separator=separator,
+                    ),
+                    separator,
+                    len(group_texts),
+                    "hybrid_batched_translation_split_mismatch",
+                ))
+            except Exception:
+                return None
+
+        # AI补全是hybrid模式的主要串行瓶颈；这些批次互不依赖且不访问DB，可安全并发。
+        if len(groups) > 1:
+            with ThreadPoolExecutor(max_workers=min(3, len(groups))) as executor:
+                group_futures = [executor.submit(_translate_group, group) for group in groups]
+            group_translations = [future.result() for future in group_futures]
+        else:
+            group_translations = [_translate_group(group) for group in groups]
+
+        for group, batch_results in zip(groups, group_translations):
+            _check_translation_abort()
             for position, unmatched_index in enumerate(group):
                 segment_index, leading, trailing, original_segment = unmatched_meta[unmatched_index]
                 try:
                     translated = (
-                        batched_translations[position]
-                        if batched_translations is not None
+                        batch_results[position]
+                        if batch_results is not None
                         else translate_with_ai(unmatched_segments[unmatched_index], model, source_lang, target_lang)
                     )
                     _record_translation_usage("ai", original_segment)
@@ -1661,6 +1689,8 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
     translated_texts = [None] * len(texts)
     pending_indexes = list(range(len(texts)))
 
+    total_items = max(1, len(texts))
+    processed_items = 0
     if _prefer_memory_first(engine):
         allow_partial = engine == "memory"
         next_pending = []
@@ -1680,6 +1710,8 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 _record_qualified_memory_usage(texts[index])
             else:
                 next_pending.append(index)
+            processed_items += 1
+            _set_translation_progress("translating", 5 + 35 * processed_items / total_items)
         pending_indexes = next_pending
 
     if engine == "memory":
@@ -1742,12 +1774,15 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
             )
             return {idx: translated_parts[position] for position, idx in enumerate(batch_indexes)}
 
+        completed_batches = 0
         if engine == "ai" and len(batch_groups) > 1:
             max_workers = min(3, len(batch_groups))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {executor.submit(_translate_ai_batch, batch_indexes): batch_indexes for batch_indexes in batch_groups}
                 for future in as_completed(future_map):
                     batch_indexes = future_map[future]
+                    completed_batches += 1
+                    _set_translation_progress("translating", 40 + 50 * completed_batches / len(batch_groups))
                     try:
                         batch_results = future.result()
                         for idx, translated in batch_results.items():
@@ -1762,6 +1797,8 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
         else:
             for batch_indexes in batch_groups:
                 _check_translation_abort()
+                completed_batches += 1
+                _set_translation_progress("translating", 40 + 50 * completed_batches / len(batch_groups))
                 if len(batch_indexes) == 1:
                     translated_texts[batch_indexes[0]] = _do_translate(texts[batch_indexes[0]], engine, model, source_lang, target_lang, db)
                 else:
@@ -2269,6 +2306,30 @@ def _indexed_entry_positions(bundle, positions):
     return [entries[position] for position in positions if 0 <= position < len(entries)]
 
 
+def _memory_library_signature(db: Session, source_lang: str, target_lang: str,
+                              bank: str | None, file_ids: tuple):
+    """Cheap DB fingerprint used to validate the process-wide bundle cache."""
+    file_parts = []
+    if file_ids:
+        rows = db.query(KnowledgeFile).filter(KnowledgeFile.id.in_(file_ids)).all()
+        by_id = {row.id: row for row in rows}
+        for file_id in file_ids:
+            row = by_id.get(file_id)
+            file_parts.append((
+                file_id,
+                str(getattr(row, "updated_at", "") or ""),
+                str(getattr(row, "file_path", "") or ""),
+            ))
+    query = db.query(func.count(MemoryBank.id), func.max(MemoryBank.id)).filter(
+        MemoryBank.source_lang == source_lang,
+        MemoryBank.target_lang == target_lang,
+    )
+    if bank:
+        query = query.filter(MemoryBank.tags == bank)
+    bank_count, bank_max_id = query.one()
+    return (tuple(file_parts), int(bank_count or 0), bank_max_id)
+
+
 def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str,
                                  bank: str = None, memory_file_ids=None, memory_file_id: int = None):
     normalized_file_ids = tuple(_normalize_memory_file_ids(memory_file_ids=memory_file_ids, memory_file_id=memory_file_id))
@@ -2277,9 +2338,32 @@ def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str
     if cache_key in cache:
         return cache[cache_key]
 
-    bundle = _build_memory_candidate_bundle(
-        _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_ids=normalized_file_ids)
-    )
+    try:
+        signature = _memory_library_signature(db, source_lang, target_lang, bank, normalized_file_ids)
+    except Exception:
+        # Tests and lightweight callers may pass a stub DB; skip global caching there.
+        signature = ("uncacheable", time.monotonic_ns())
+    global_key = ("bundle", source_lang, target_lang, bank or "", normalized_file_ids, signature)
+    bundle = None
+    with _memory_bundle_global_lock:
+        entry = _memory_bundle_global_cache.get(global_key)
+        if entry and time.monotonic() - entry["created"] < _MEMORY_BUNDLE_GLOBAL_TTL_SECONDS:
+            entry["created"] = time.monotonic()
+            bundle = entry["bundle"]
+    if bundle is None:
+        bundle = _build_memory_candidate_bundle(
+            _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_ids=normalized_file_ids)
+        )
+        with _memory_bundle_global_lock:
+            now = time.monotonic()
+            stale = [key for key, value in _memory_bundle_global_cache.items()
+                     if now - value["created"] >= _MEMORY_BUNDLE_GLOBAL_TTL_SECONDS]
+            for key in stale:
+                _memory_bundle_global_cache.pop(key, None)
+            while len(_memory_bundle_global_cache) >= _MEMORY_BUNDLE_GLOBAL_MAX_ENTRIES:
+                _memory_bundle_global_cache.pop(next(iter(_memory_bundle_global_cache)))
+            _memory_bundle_global_cache[global_key] = {"bundle": bundle, "created": now}
+
     cache[cache_key] = bundle
     return bundle
 
