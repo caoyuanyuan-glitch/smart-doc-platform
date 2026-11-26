@@ -56,6 +56,16 @@ from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
 from app.review_engine.cn_typo import check_cn_typos
 from app.review_engine.learned_patch import check_learned_patches
+from app.review_engine.bilingual_align import (
+    bilingual_value_status,
+    bilingual_values_match,
+    build_bilingual_rows,
+    detect_doc_language,
+    extract_flow_profile as extract_bilingual_flow_profile,
+    is_bilingual_compare,
+    language_label,
+    summarize_flow_profile as summarize_bilingual_flow_profile,
+)
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -7781,6 +7791,12 @@ def _generate_compare_review_html_content(review, doc):
         for index, item in enumerate(reference_columns)
     ) or '<div class="empty-state">未提供参考文件</div>'
 
+    hero_text = (
+        '本报告在核心参数与主干流程比对之外，同时按目录标题、货号/型号和带单位数值做中英对照。'
+        if summary.get('bilingual') else
+        '本报告仅对主文档与参考文件中的白名单核心参数，以及“操作流程 / 实验步骤 / 操作步骤 / 注意事项”章节的主干流程进行比对。'
+    )
+
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -7844,7 +7860,7 @@ def _generate_compare_review_html_content(review, doc):
   <div class="container">
     <div class="hero">
       <h1>对比审核报告</h1>
-      <p>本报告仅对主文档与参考文件中的白名单核心参数，以及“操作流程 / 实验步骤 / 操作步骤 / 注意事项”章节的主干流程进行比对。</p>
+      <p>{hero_text}</p>
     </div>
     <div class="meta">
       <div class="meta-card"><div class="meta-label">主文档</div><div class="meta-value">{filename}</div></div>
@@ -15429,7 +15445,7 @@ def _extract_step_index(text):
 
 COMPARE_PARAM_DEFINITIONS = [
     {"dimension": "基础信息", "name": "产品名称", "priority": "P0", "aliases": ["产品名称", "产品名", "产品名称name", "productname"]},
-    {"dimension": "基础信息", "name": "货号", "priority": "P0", "aliases": ["货号", "产品货号", "订货号", "目录号", "catalognumber", "catno", "货号catno"]},
+    {"dimension": "基础信息", "name": "货号", "priority": "P0", "aliases": ["货号", "产品货号", "订货号", "目录号", "catalognumber", "catalogno", "cat.no.", "cat no", "catno", "货号catno"]},
     {"dimension": "基础信息", "name": "规格", "priority": "P0", "aliases": ["规格", "产品规格", "包装规格", "specification", "规格型号"]},
     {"dimension": "基础信息", "name": "储存条件", "priority": "P1", "aliases": ["储存条件", "储存", "存储条件", "保存条件", "storage", "storagecondition"]},
     {"dimension": "基础信息", "name": "有效期", "priority": "P1", "aliases": ["有效期", "保质期", "失效日期", "稳定期", "shelflife", "expiry", "expiration"]},
@@ -15451,6 +15467,10 @@ COMPARE_PARAM_DEFINITIONS = [
 COMPARE_ALLOWED_MODES = {"both"}
 COMPARE_FLOW_SECTION_KEYWORDS = ("操作流程", "实验步骤", "操作步骤", "注意事项")
 COMPARE_STEP_PATTERN = re.compile(r"^(?:step\s*\d+\s*[:：\.-]?|\d+[\.)、]\s*|[一二三四五六七八九十]+[、.]\s*|[-*•]\s+)", re.IGNORECASE)
+COMPARE_JUNK_PARAM_VALUES = {
+    "说明书", "user manual", "usermanual", "manual", "restarting the device",
+    "表示该仪器的制造商", "indicates the name and address of the device",
+}
 COMPARE_HEADING_PATTERN = re.compile(r"^(?:\d+(?:\.\d+){0,2}\s+)?[\u4e00-\u9fffA-Za-z].{0,24}$")
 
 
@@ -15463,7 +15483,13 @@ def _normalize_compare_param_key(name):
 def _normalize_compare_param_value(value):
     text = parse_value(str(value or "")).strip()
     text = re.sub(r"\s+", " ", text)
-    return text.strip("；;，, ")
+    text = text.strip("；;，, ")
+    if text in {"-", "—", "–", "/", "N/A", "n/a", "NA", "无", "None", "null"}:
+        return ""
+    compact = re.sub(r"[\s:：.]+", "", text).casefold()
+    if compact in COMPARE_JUNK_PARAM_VALUES or text.casefold() in COMPARE_JUNK_PARAM_VALUES:
+        return ""
+    return text
 
 
 def _compare_param_name_matches(name, aliases):
@@ -15474,7 +15500,7 @@ def _compare_param_name_matches(name, aliases):
         alias_key = _normalize_compare_param_key(alias)
         if not alias_key:
             continue
-        if key == alias_key or key.startswith(alias_key):
+        if key == alias_key:
             return True
     return False
 
@@ -15572,15 +15598,19 @@ def _normalize_reference_items(items):
     return normalized
 
 
-def _compare_values_match(value_a, value_b):
+def _compare_values_match(value_a, value_b, bilingual=False):
     left = _normalize_compare_param_value(value_a)
     right = _normalize_compare_param_value(value_b)
     if not left or not right:
         return False
-    return _values_equal(left, right)
+    if _values_equal(left, right):
+        return True
+    if bilingual:
+        return bilingual_values_match(left, right)
+    return False
 
 
-def _resolve_compare_row_level(field_def, main_value, reference_summary):
+def _resolve_compare_row_level(field_def, main_value, reference_summary, bilingual=False):
     priority = field_def.get("priority", "P1")
     field_name = str(field_def.get("name") or "")
     reference_values = reference_summary.get("values") or []
@@ -15597,15 +15627,21 @@ def _resolve_compare_row_level(field_def, main_value, reference_summary):
         return priority, "主文档缺少该字段，请补充并与参考文件核对。"
     if main_value and reference_summary["status"] == "missing":
         return "P2", "参考文件未形成可用参照值，请人工确认主文档内容。"
-    matched_values = [value for value in reference_values if _compare_values_match(main_value, value)]
+    matched_values = [value for value in reference_values if _compare_values_match(main_value, value, bilingual=bilingual)]
     if len(matched_values) == len(reference_values):
         return "一致", "主文档与参考文件一致。"
     if matched_values:
         return "P2", "主文档与少量参考文件一致，但参照物之间存在多个版本，请确认最终版本。"
+    if bilingual:
+        statuses = [bilingual_value_status(main_value, value) for value in reference_values]
+        if statuses and all(status == "translation" for status in statuses):
+            return "P2", "中英表述不同，未检出可对齐的货号或数值，请人工确认译名是否对应。"
+        if statuses and all(status == "match" for status in statuses):
+            return "一致", "中英核心数值或型号一致。"
     return priority, "主文档与参考文件不一致，请按最终版本修正。"
 
 
-def _build_compare_param_rows(main_doc, reference_docs):
+def _build_compare_param_rows(main_doc, reference_docs, bilingual=False):
     rows = []
     for field_def in COMPARE_PARAM_DEFINITIONS:
         main_value = _extract_compare_field_value(main_doc.get("params") or [], field_def)
@@ -15618,7 +15654,7 @@ def _build_compare_param_rows(main_doc, reference_docs):
         ])
         reference_values = [item.get("value") for item in reference_items]
         reference_summary = _reference_value_summary(reference_values)
-        level, conclusion = _resolve_compare_row_level(field_def, main_value, reference_summary)
+        level, conclusion = _resolve_compare_row_level(field_def, main_value, reference_summary, bilingual=bilingual)
         rows.append({
             "dimension": field_def["dimension"],
             "parameter_name": field_def["name"],
@@ -15692,9 +15728,13 @@ def _summarize_flow_profile(profile):
     return f"{heading_text}；识别到 {len(profile.get('steps') or [])} 个主干步骤"
 
 
-def _build_compare_flow_row(main_doc, reference_docs):
-    main_profile = _extract_flow_profile(main_doc.get("text") or "")
-    reference_profiles = [_extract_flow_profile(doc.get("text") or "") for doc in reference_docs]
+def _build_compare_flow_row(main_doc, reference_docs, bilingual=False):
+    if bilingual:
+        main_profile = extract_bilingual_flow_profile(main_doc.get("text") or "")
+        reference_profiles = [extract_bilingual_flow_profile(doc.get("text") or "") for doc in reference_docs]
+    else:
+        main_profile = _extract_flow_profile(main_doc.get("text") or "")
+        reference_profiles = [_extract_flow_profile(doc.get("text") or "") for doc in reference_docs]
     reference_step_counts = [len(profile.get("steps") or []) for profile in reference_profiles]
     nonzero_reference_step_counts = [count for count in reference_step_counts if count > 0]
     count_counter = Counter(nonzero_reference_step_counts)
@@ -15724,26 +15764,30 @@ def _build_compare_flow_row(main_doc, reference_docs):
         conclusion = "参考文件未识别到主干流程步骤，当前无法完成有效比对，请先检查参考文件内容或格式。"
     elif main_count == 0 and majority_step_count > 0:
         level = "P1"
-        conclusion = "主文档未识别到主干流程步骤，请补充“操作流程/实验步骤/操作步骤/注意事项”章节。"
+        conclusion = (
+            "主文档未识别到主干流程步骤，请补充对应操作流程章节。"
+            if bilingual else
+            "主文档未识别到主干流程步骤，请补充“操作流程/实验步骤/操作步骤/注意事项”章节。"
+        )
     elif majority_step_count > 0 and abs(main_count - majority_step_count) / majority_step_count > 0.3:
         level = "P1"
         conclusion = f"主文档主干步骤数为 {main_count}，参考文件众数为 {majority_step_count}，差异超过 30%。"
-    elif missing_steps:
+    elif missing_steps and not bilingual:
         level = "P1"
         conclusion = f"主文档缺少参考文件中的主干步骤：{'；'.join(missing_steps)}。"
     else:
         level = "一致"
-        conclusion = "主文档主干流程与参考文件整体一致。"
+        conclusion = "中英文主干步骤数整体一致。" if bilingual else "主文档主干流程与参考文件整体一致。"
 
     reference_heading_values = [
-        _summarize_flow_profile(profile)
+        (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(profile)
         for profile in reference_profiles
         if (profile.get("sections") or profile.get("steps"))
     ]
     reference_heading_items = _normalize_reference_items([
         {
             "filename": doc.get("filename") or "参考文件",
-            "value": _summarize_flow_profile(profile),
+            "value": (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(profile),
         }
         for doc, profile in zip(reference_docs, reference_profiles)
     ])
@@ -15751,7 +15795,7 @@ def _build_compare_flow_row(main_doc, reference_docs):
     return {
         "dimension": "操作流程",
         "parameter_name": "主干流程",
-        "main_value": _summarize_flow_profile(main_profile),
+        "main_value": (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(main_profile),
         "reference_values": reference_heading_items,
         "reference_summary": reference_summary["display_value"],
         "reference_detail": _reference_detail_summary(reference_heading_items),
@@ -15767,22 +15811,39 @@ def _compare_level_order(level):
 
 
 def _build_compare_audit_payload(main_doc, reference_docs, mode):
-    compare_rows = _build_compare_param_rows(main_doc, reference_docs)
-    compare_rows.append(_build_compare_flow_row(main_doc, reference_docs))
+    bilingual = is_bilingual_compare(
+        main_doc.get("text") or "",
+        [doc.get("text") or "" for doc in reference_docs],
+    )
+    compare_rows = _build_compare_param_rows(main_doc, reference_docs, bilingual=bilingual)
+    compare_rows.append(_build_compare_flow_row(main_doc, reference_docs, bilingual=bilingual))
+    if bilingual:
+        compare_rows.extend(build_bilingual_rows(main_doc, reference_docs, enable_ai=False))
     compare_rows = sorted(compare_rows, key=lambda row: (_compare_level_order(row.get("level")), row.get("dimension"), row.get("parameter_name")))
     summary_counts = Counter(row.get("level") for row in compare_rows)
+    main_lang = detect_doc_language(main_doc.get("text") or "")
     return {
         "main_document": {
             "filename": main_doc["filename"],
             "char_count": len(main_doc.get("text") or ""),
+            "language": main_lang,
+            "language_label": language_label(main_lang),
         },
         "reference_documents": [
-            {"filename": doc["filename"], "char_count": len(doc.get("text") or "")}
+            {
+                "filename": doc["filename"],
+                "char_count": len(doc.get("text") or ""),
+                "language": detect_doc_language(doc.get("text") or ""),
+                "language_label": language_label(detect_doc_language(doc.get("text") or "")),
+            }
             for doc in reference_docs
         ],
         "summary": {
             "mode": mode,
             "reference_count": len(reference_docs),
+            "bilingual": bilingual,
+            "main_language": main_lang,
+            "main_language_label": language_label(main_lang),
             "p0_count": summary_counts.get("P0", 0),
             "p1_count": summary_counts.get("P1", 0),
             "p2_count": summary_counts.get("P2", 0),
@@ -15818,19 +15879,32 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             f"{item.get('filename') or '参考文件'}：{item.get('value') or '-'}"
             for item in (row.get("reference_values") or [])
         ]
+        kind = row.get("kind")
+        if kind == "parameter":
+            category = "核心参数对比"
+            source = "compare_param"
+            audit_basis = "对比审核 - 核心参数差异明细表"
+        elif kind == "bilingual":
+            category = "中英对照"
+            source = "compare_bilingual"
+            audit_basis = "对比审核 - 中英对照明细表"
+        else:
+            category = "主干流程比对"
+            source = "compare_flow"
+            audit_basis = "对比审核 - 核心参数差异明细表"
         payloads.append(IssueCreate(
             review_id=review_id,
             severity=severity_map.get(level, "general"),
-            category='核心参数对比' if row.get('kind') == 'parameter' else '主干流程比对',
+            category=category,
             rule='',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
             context="\n".join([f"主文档：{row.get('main_value') or '-'}", *reference_lines]),
             suggestion='请以参考文件的稳定版本为准，核对主文档并完成修订。',
             description=str(row.get('conclusion') or '对比审核发现差异'),
-            audit_basis='对比审核 - 核心参数差异明细表',
+            audit_basis=audit_basis,
             confidence=95,
-            source='compare_param' if row.get('kind') == 'parameter' else 'compare_flow',
+            source=source,
             position=_encode_issue_position_with_meta(0, 0, compare_type=row.get('kind'), compare_level=level, parameter_name=row.get('parameter_name')),
             status='pending',
         ))
@@ -15903,6 +15977,8 @@ async def compare_audit(
     for issue_payload in _build_compare_issue_payloads(review.id, compare_payload):
         create_issue(db, issue_payload)
 
+    bilingual = bool((compare_payload.get("summary") or {}).get("bilingual"))
+    done_message = "中英对照审核完成" if bilingual else "对比审核完成"
     compare_summary = {
         **compare_payload.get("summary", {}),
         "compare_rows": compare_payload.get("compare_rows") or [],
@@ -15910,7 +15986,7 @@ async def compare_audit(
         "main_filename": main_doc["filename"],
         "reference_documents": compare_payload.get("reference_documents") or [],
         "reference_filenames": [doc["filename"] for doc in reference_docs],
-        "message": "对比审核完成",
+        "message": done_message,
     }
     update_review_status(
         db,
@@ -15919,12 +15995,12 @@ async def compare_audit(
         int(compare_summary.get("total_issue_count") or 0),
         json.dumps(compare_summary, ensure_ascii=False),
     )
-    set_progress(review.id, 'completed', '完成', 100, '对比审核完成')
+    set_progress(review.id, 'completed', '完成', 100, done_message)
 
     return {
         "review_id": review.id,
         "status": "completed",
-        "message": "对比审核完成",
+        "message": done_message,
         "document_id": document.id,
         **compare_payload,
     }

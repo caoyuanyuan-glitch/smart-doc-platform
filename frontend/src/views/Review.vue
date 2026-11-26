@@ -191,7 +191,7 @@
                 >
                   <el-button type="primary" plain>上传参考文件</el-button>
                 </el-upload>
-                <div class="upload-tip">至少上传 1 个参考文件；仅检查白名单核心参数与主干流程</div>
+                <div class="upload-tip">至少上传 1 个参考文件；中英各一份时自动做中英对照</div>
               </div>
             </div>
 
@@ -200,7 +200,7 @@
               <el-radio-group v-model="compareMode" size="small">
                 <el-radio-button label="both">核心参数 + 主干流程</el-radio-button>
               </el-radio-group>
-              <span class="review-mode-hint">按属性-值方式识别参数，一致项默认折叠。</span>
+              <span class="review-mode-hint">按属性-值识别参数；中英各一份时同时对照章节序号、货号和数值。</span>
             </div>
 
             <div class="compare-action-row">
@@ -215,11 +215,19 @@
           </div>
 
           <div v-if="compareResult" class="report-section compare-result-section">
-            <h3>对比审核结果</h3>
+            <h3 class="compare-result-title">
+              对比审核结果
+              <el-tag v-if="compareResult.summary?.bilingual" type="success" size="small">中英对照</el-tag>
+            </h3>
             <div class="compare-summary-grid">
               <div class="compare-summary-card">
                 <div class="gold-label">主文档</div>
-                <div class="compare-summary-name">{{ compareResult.main_document?.filename || '-' }}</div>
+                <div class="compare-summary-name">
+                  {{ compareResult.main_document?.filename || '-' }}
+                  <span v-if="compareResult.main_document?.language_label" class="compare-lang-label">
+                    {{ compareResult.main_document.language_label }}
+                  </span>
+                </div>
               </div>
               <div class="compare-summary-card">
                 <div class="gold-label">参考文件数</div>
@@ -237,15 +245,51 @@
 
             <div class="compare-result-toolbar">
               <div class="compare-result-toolbar-text">
-                当前默认只展示差异项，便于直接处理高优先级问题。
+                {{ compareResult.summary?.bilingual
+                  ? '中英对照默认展示目录与章节差异；打开“显示一致项”可查看已对齐章节。'
+                  : '当前默认只展示差异项，便于直接处理高优先级问题。' }}
               </div>
               <el-switch v-model="showCompareConsistent" active-text="显示一致项" inactive-text="隐藏一致项" />
+            </div>
+
+            <div v-if="compareResult.summary?.bilingual" class="compare-result-block">
+              <h4>中英对照明细表</h4>
+              <div class="compare-table-wrap">
+                <el-table :data="visibleBilingualCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
+                  <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
+                  <el-table-column prop="parameter_name" label="对照项" width="220" fixed="left" />
+                  <el-table-column label="主文档内容" width="320" show-overflow-tooltip fixed="left">
+                    <template #default="scope">
+                      <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    v-for="(column, index) in compareReferenceColumns"
+                    :key="`bilingual-${column.filename || 'reference'}-${index}`"
+                    :label="column.filename || `参考文件${index + 1}`"
+                    width="240"
+                    show-overflow-tooltip
+                  >
+                    <template #default="scope">
+                      <span>{{ renderCompareReferenceValue(scope.row, index) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="异常说明 / 差异结论" width="320">
+                    <template #default="scope">
+                      <div class="compare-conclusion-cell">
+                        <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
+                        <span>{{ scope.row.conclusion }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </div>
 
             <div class="compare-result-block">
               <h4>核心参数差异明细表</h4>
               <div class="compare-table-wrap">
-                <el-table :data="visibleCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
+                <el-table :data="visibleParamCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
                   <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
                   <el-table-column prop="parameter_name" label="参数名称" width="180" fixed="left" />
                   <el-table-column label="主文档（说明书）内容" width="320" show-overflow-tooltip fixed="left">
@@ -277,7 +321,7 @@
             </div>
 
             <el-empty
-              v-if="!visibleCompareRows.length"
+              v-if="!visibleParamCompareRows.length && !visibleBilingualCompareRows.length"
               description="当前筛选条件下没有可展示的差异项"
             />
 
@@ -1819,6 +1863,17 @@ const visibleCompareRows = computed(() => {
   return rows.filter((row) => row.level !== '一致')
 })
 
+const visibleParamCompareRows = computed(() => {
+  return visibleCompareRows.value.filter((row) => row.kind !== 'bilingual')
+})
+
+const visibleBilingualCompareRows = computed(() => {
+  const rows = (compareResult.value?.compare_rows || []).filter((row) => row.kind === 'bilingual')
+  if (showCompareConsistent.value) return rows
+  const diffs = rows.filter((row) => row.level !== '一致')
+  return diffs.length ? diffs : rows
+})
+
 const compareReferenceColumns = computed(() => {
   const documents = compareResult.value?.reference_documents || []
   if (documents.length) return documents
@@ -2531,7 +2586,7 @@ async function startCompareAudit() {
     compareResult.value = response.data
     await loadReviews()
     await loadDocuments()
-    ElMessage.success('对比审核完成')
+    ElMessage.success(response.data?.summary?.bilingual ? '中英对照审核完成' : '对比审核完成')
   } catch (error) {
     compareResult.value = null
     ElMessage.error(`对比审核失败: ${getAPIErrorMessage(error)}`)
@@ -4284,6 +4339,19 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.compare-result-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compare-lang-label {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
 }
 
 .compare-result-toolbar {
