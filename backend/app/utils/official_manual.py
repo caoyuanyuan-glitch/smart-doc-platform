@@ -1,13 +1,19 @@
 import os
 import re
+import json
+import shutil
+import hashlib
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import httpx
 import requests
 from requests.adapters import HTTPAdapter
+
+from app.utils.runtime_paths import runtime_root
 
 OFFICIAL_BASE = "https://www.mgi-tech.com"
 SEARCH_URL = f"{OFFICIAL_BASE}/index/index/manualSeaList"
@@ -501,7 +507,103 @@ def public_item(item: dict) -> dict:
         "official_url": download,
         "library_url": cfg["library_url"],
         "score": round(float(item.get("_score") or 0), 3),
+        "cached": bool(item.get("_cached")),
     }
+
+
+def _en_cache_dir() -> Path:
+    path = runtime_root() / "manual-cache" / "en"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _en_search_cache_path(keyword: str) -> Path:
+    digest = hashlib.sha1(compact_key(keyword).encode("utf-8")).hexdigest()
+    return _en_cache_dir() / f"search-{digest}.json"
+
+
+def _read_en_search_cache(keyword: str) -> List[dict]:
+    path = _en_search_cache_path(keyword)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    return items if isinstance(items, list) else []
+
+
+def _write_en_search_cache(keyword: str, items: List[dict]) -> None:
+    if not items:
+        return
+    path = _en_search_cache_path(keyword)
+    payload = {"keyword": keyword, "cached_at": int(time.time()), "items": items}
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        logger.warning("en search cache write failed: %s", exc)
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _read_en_search_cache_fuzzy(keyword: str) -> List[dict]:
+    target = compact_key(keyword)
+    if not target:
+        return []
+    best_items: List[dict] = []
+    best_overlap = 0
+    for path in _en_cache_dir().glob("search-*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        stored = compact_key(data.get("keyword") or "") if isinstance(data, dict) else ""
+        if not stored:
+            continue
+        if stored in target or target in stored:
+            overlap = len(stored)
+            items = data.get("items")
+            if isinstance(items, list) and overlap > best_overlap:
+                best_overlap = overlap
+                best_items = items
+    return best_items
+
+
+def _en_pdf_cache_path(url: str) -> Path:
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    path = _en_cache_dir() / "pdf"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{digest}.pdf"
+
+
+def _cache_en_pdf(url: str, source_path: str) -> None:
+    try:
+        shutil.copy2(source_path, _en_pdf_cache_path(url))
+    except OSError as exc:
+        logger.warning("en pdf cache write failed: %s", exc)
+
+
+def _restore_cached_en_pdf(url: str, dest_path: str) -> bool:
+    cached = _en_pdf_cache_path(url)
+    if not cached.exists():
+        return False
+    try:
+        shutil.copy2(cached, dest_path)
+        logger.warning("en pdf download failed, restored cached copy: %s", url)
+        return True
+    except OSError as exc:
+        logger.warning("en pdf cache restore failed: %s", exc)
+        return False
+
+
+def has_cached_en_pdf(url: str) -> bool:
+    return bool(url) and _en_pdf_cache_path(url).exists()
 
 
 def _fetch_official_rows(http, cfg: dict, keyword: str, limit: int) -> List[dict]:
@@ -557,6 +659,7 @@ def search_official_manuals(
     if not keyword:
         return []
     cfg = official_site(site)
+    is_en = cfg.get("kind") == "en_wp"
     created_http = False
     http = client
     if http is None and cfg.get("kind") != "en_wp":
@@ -583,7 +686,17 @@ def search_official_manuals(
             if merged:
                 break
         if not merged and last_err:
+            if is_en:
+                cached = _read_en_search_cache(keyword) or _read_en_search_cache_fuzzy(keyword)
+                if cached:
+                    logger.warning(
+                        "en search %s failed, using cached %s items: %s",
+                        keyword, len(cached), last_err,
+                    )
+                    return [{**item, "_cached": True} for item in cached][:limit]
             raise last_err
+        if is_en and merged:
+            _write_en_search_cache(keyword, merged[:limit])
     finally:
         if created_http:
             http.close()
@@ -651,6 +764,7 @@ def download_official_pdf(files_path: str, dest_path: str, client: Optional[http
                         fh.write(chunk)
                 resp.close()
                 os.replace(tmp_path, dest_path)
+                _cache_en_pdf(url, dest_path)
                 return
             except Exception as exc:
                 last_err = exc
@@ -661,6 +775,8 @@ def download_official_pdf(files_path: str, dest_path: str, client: Optional[http
                     except OSError:
                         pass
                 time.sleep(0.6 * (attempt + 1))
+        if _restore_cached_en_pdf(url, dest_path):
+            return
         raise last_err
     headers = EN_DOWNLOAD_HEADERS if "global-mgitech.com" in url else OFFICIAL_HEADERS
     own_client = client is None
@@ -676,12 +792,16 @@ def download_official_pdf(files_path: str, dest_path: str, client: Optional[http
                         raise ValueError("pdf too large")
                     fh.write(chunk)
         os.replace(tmp_path, dest_path)
+        if "global-mgitech.com" in url:
+            _cache_en_pdf(url, dest_path)
     except Exception:
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
+        if "global-mgitech.com" in url and _restore_cached_en_pdf(url, dest_path):
+            return
         raise
     finally:
         if own_client:

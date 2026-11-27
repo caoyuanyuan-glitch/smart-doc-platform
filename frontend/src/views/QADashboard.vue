@@ -106,10 +106,11 @@
     </div>
 
     <div class="detail-section sources-section" v-if="userStore.isAdmin">
-      <el-collapse class="sources-collapse">
+      <el-collapse v-model="sourcesExpanded" class="sources-collapse">
         <el-collapse-item name="sources">
           <template #title>
             <span class="sources-title">知识库问答资料清单</span>
+            <span v-if="sourcesUpdatedAt" class="sources-updated">更新于 {{ formatClock(sourcesUpdatedAt) }}</span>
           </template>
           <div v-if="sourcesError" class="sources-error">{{ sourcesError }}</div>
           <el-collapse class="scene-collapse">
@@ -120,7 +121,7 @@
                     <span class="scene-kicker">{{ scene.kicker }}</span>
                     <span class="scene-title">{{ scene.title }}</span>
                   </div>
-                  <span class="scene-count">{{ scene.file_count }} 份资料</span>
+                  <span class="scene-count">{{ scene.folder_count ?? 0 }} 个目录 · {{ scene.file_count }} 份资料</span>
                 </div>
               </template>
               <el-table
@@ -221,7 +222,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { qaAPI } from '@/api'
 import { useUserStore } from '@/store/user'
@@ -255,6 +256,12 @@ const filterRating = ref(null)
 const sourceScenes = ref([])
 const sourcesLoading = ref(false)
 const sourcesError = ref('')
+const sourcesExpanded = ref([])
+const sourcesUpdatedAt = ref(null)
+const sourcesOpen = computed(() => {
+  const value = sourcesExpanded.value
+  return Array.isArray(value) ? value.includes('sources') : value === 'sources'
+})
 
 const chartUsersOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -351,6 +358,13 @@ function formatTime(iso) {
   return String(iso).replace('T', ' ').slice(0, 19)
 }
 
+function formatClock(value) {
+  if (!value) return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
 function formatDuration(durationMs) {
   const ms = Number(durationMs || 0)
   if (!ms || ms < 0) return '-'
@@ -364,7 +378,6 @@ function formatDuration(durationMs) {
 }
 
 function sceneEmptyText(scene) {
-  if (scene?.missing_paths?.length) return '该板块暂无资料 / 目录待同步'
   return '该板块暂无资料'
 }
 
@@ -373,22 +386,65 @@ function openSourceFile(row) {
   router.push({ path: `/knowledge/${row.folder_id}`, query: { preview: String(row.id) } })
 }
 
-async function loadSceneSources() {
+const SOURCES_POLL_INTERVAL_MS = 10000
+let sourcesTimer = null
+let sourcesRequestSeq = 0
+
+async function loadSceneSources({ silent = false } = {}) {
   if (!userStore.isAdmin) {
     sourceScenes.value = []
     sourcesError.value = ''
     return
   }
-  sourcesLoading.value = true
-  sourcesError.value = ''
+  if (sourcesLoading.value) return
+  if (!silent) sourcesLoading.value = true
+  const seq = ++sourcesRequestSeq
   try {
     const r = await qaAPI.getSceneSources()
+    if (seq !== sourcesRequestSeq) return
     sourceScenes.value = r.data?.scenes || []
+    sourcesUpdatedAt.value = new Date()
+    sourcesError.value = ''
   } catch (e) {
-    sourceScenes.value = []
-    sourcesError.value = '知识库目录加载失败'
+    if (seq !== sourcesRequestSeq) return
+    if (!silent) {
+      sourceScenes.value = []
+      sourcesError.value = '知识库目录加载失败'
+    }
+  } finally {
+    if (!silent) sourcesLoading.value = false
   }
-  sourcesLoading.value = false
+}
+
+function stopSourcesPolling() {
+  if (sourcesTimer) {
+    clearInterval(sourcesTimer)
+    sourcesTimer = null
+  }
+}
+
+function startSourcesPolling() {
+  stopSourcesPolling()
+  if (!userStore.isAdmin) return
+  sourcesTimer = setInterval(() => {
+    if (sourcesOpen.value && document.visibilityState === 'visible') {
+      loadSceneSources({ silent: true })
+    }
+  }, SOURCES_POLL_INTERVAL_MS)
+}
+
+function refreshSourcesIfVisible() {
+  if (userStore.isAdmin && sourcesOpen.value && document.visibilityState === 'visible') {
+    loadSceneSources({ silent: true })
+  }
+}
+
+function handleSourcesVisibilityChange() {
+  refreshSourcesIfVisible()
+}
+
+function handleSourcesWindowFocus() {
+  refreshSourcesIfVisible()
 }
 
 function refreshAll() {
@@ -396,9 +452,22 @@ function refreshAll() {
   loadSceneSources()
 }
 
+watch(sourcesOpen, (open) => {
+  if (open) loadSceneSources({ silent: true })
+})
+
 onMounted(() => {
   loadDashboard()
   loadSceneSources()
+  startSourcesPolling()
+  document.addEventListener('visibilitychange', handleSourcesVisibilityChange)
+  window.addEventListener('focus', handleSourcesWindowFocus)
+})
+
+onUnmounted(() => {
+  stopSourcesPolling()
+  document.removeEventListener('visibilitychange', handleSourcesVisibilityChange)
+  window.removeEventListener('focus', handleSourcesWindowFocus)
 })
 </script>
 
@@ -471,6 +540,7 @@ onMounted(() => {
 .sources-section { padding-top: 8px; padding-bottom: 8px; }
 .sources-collapse { border: none; }
 .sources-title { font-size: 15px; font-weight: 600; color: #1e293b; }
+.sources-updated { margin-left: 10px; font-size: 12px; font-weight: 400; color: #94a3b8; }
 .sources-collapse :deep(.el-collapse-item__header) { height: 40px; line-height: 40px; border: none; }
 .sources-collapse :deep(.el-collapse-item__wrap) { border: none; }
 .sources-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }

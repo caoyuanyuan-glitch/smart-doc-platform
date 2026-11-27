@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from app.models.knowledge import Folder, KnowledgeFile
+from app.models.qa_card import QaCardFolder
 from app.models.user import User
 from app.schemas.knowledge import FolderCreate, FileCreate
 
@@ -133,6 +134,7 @@ def move_folder(db: Session, folder_id: int, parent_id: int | None):
 def delete_folder(db: Session, folder_id: int):
     folder = get_folder(db, folder_id)
     if folder:
+        db.query(QaCardFolder).filter(QaCardFolder.folder_id == folder_id).delete(synchronize_session=False)
         # 递归删除所有子文件夹
         for child in folder.children:
             delete_folder(db, child.id)
