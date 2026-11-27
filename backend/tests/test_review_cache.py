@@ -529,6 +529,120 @@ def test_list_reviews_batches_document_lookup(monkeypatch):
     assert result[1]["document_file_type"] == "pdf"
 
 
+def test_dedup_across_chunks_merges_same_ai_chunk_span():
+    """AI 为同一片段给出不同 chapter 名时，列表里不应出现两条完全相同的问题。"""
+    base = {
+        "source": "ai", "rule": "", "category": "格式排版",
+        "original_text": "维护清洗试剂槽1 无无",
+        "position": {"chunk_index": 25, "chunk_start": 69686},
+    }
+    first = dict(base, chapter="表 70 准备维护清洗试剂槽（第128页）")
+    second = dict(base, chapter="表 71 准备维护清洗试剂槽（第129页）")
+
+    kept = review_api._dedup_across_chunks([first, second])
+
+    assert len(kept) == 1
+    assert second["dedupe_reason"] == "same_identity_key"
+
+
+def test_dedup_across_chunks_keeps_issues_from_different_chunks():
+    base = {
+        "source": "ai", "rule": "", "category": "格式排版",
+        "original_text": "维护清洗试剂槽1 无无",
+        "position": {"chunk_index": 25, "chunk_start": 69686},
+    }
+    first = dict(base, chapter="表 70")
+    second = dict(base, chapter="表 70", position={"chunk_index": 26, "chunk_start": 70100})
+
+    assert len(review_api._dedup_across_chunks([first, second])) == 2
+
+
+def test_dedupe_by_original_merges_same_ai_chunk_span_with_step_chapter():
+    """AI 把同一片段的问题分别标到'第3步'和'第4步'时只保留一条。"""
+    base = {
+        "source": "ai", "rule": "", "category": "术语一致性",
+        "original_text": "组分管盖颜色", "severity": "general", "confidence": 70,
+        "position": {"chunk_index": 16, "chunk_start": 44136, "page_number": 88},
+    }
+    first = dict(base, chapter="手工制备DNB 准备DNB 制备试剂 第3步")
+    second = dict(base, chapter="手工制备DNB 准备DNB 制备试剂 第4步")
+
+    kept = review_api.dedupe_issues_by_original([first, second])
+
+    assert len(kept) == 1
+
+
+def test_dedupe_merges_same_ai_chunk_span_when_position_is_json_string():
+    """position 被序列化成 JSON 字符串后，同分块同片段的重复问题仍要合并。"""
+    position = '{"chunk_index": 27, "chunk_start": 77230, "page_number": 161}'
+    a = {
+        "source": "ai", "rule": "", "category": "操作步骤",
+        "original_text": "点击界面顶部蓝色横线，点击 ，重启SBC。",
+        "severity": "general", "position": position, "chapter": "运行软件时报错 步骤2",
+    }
+    b = dict(a, chapter="载片吸附异常 步骤3")
+    c = dict(a, chapter="载片转移异常 步骤1")
+
+    assert len(review_api.dedupe_issues_by_original([a, b, c])) == 1
+
+
+def test_dedupe_merges_rule_typo_with_ai_filename_sentence():
+    """规则引擎报单词、AI 报同一文件名的整句拼写问题 → 只保留规则条目。"""
+    rule_issue = {
+        "source": "rule", "category": "拼写", "original_text": "Sequencetat",
+        "description": "疑似拼写错误", "severity": "general",
+        "position": {"page_number": 118},
+    }
+    ai_issue = {
+        "source": "ai", "category": "拼写", "original_text": "拆分结果保存在 Sequencetat.txt 中",
+        "description": "文件名拼写错误，SequenceStat 缺失 ce", "severity": "general",
+        "position": {"page_number": 118}, "chapter": "拆分数据 步骤3",
+    }
+
+    kept = review_api.dedupe_issues_by_original([ai_issue, rule_issue])
+
+    assert len(kept) == 1
+    assert kept[0]["source"] == "rule"
+
+
+def test_dedupe_keeps_rule_and_ai_when_word_not_in_ai_text():
+    rule_issue = {
+        "source": "rule", "original_text": "Sequencetat", "description": "疑似拼写错误",
+        "position": {"page_number": 118},
+    }
+    ai_issue = {
+        "source": "ai", "original_text": "拆分结果保存在 BarcodeStat.txt 中",
+        "description": "文件名拼写错误", "position": {"page_number": 118},
+    }
+
+    assert len(review_api.dedupe_issues_by_original([ai_issue, rule_issue])) == 2
+
+
+def test_list_reviews_compacts_large_summary(monkeypatch):
+    huge = json.dumps({
+        "total": 86,
+        "serious": 8,
+        "cache_hit": False,
+        "ai_review": "x" * 50000,
+        "pdf_page_metadata": {"pages": list(range(200))},
+    })
+    reviews = [SimpleNamespace(id=6, document_id=5, status="completed", summary=huge, total_issues=86)]
+    documents = [SimpleNamespace(id=5, filename="demo.pdf", file_type="pdf")]
+    monkeypatch.setattr(review_api, "get_reviews", lambda db: reviews)
+    monkeypatch.setattr(review_api, "_reconcile_review_runtime_state", lambda db, review: review)
+    monkeypatch.setattr(review_api, "get_progress", lambda review_id: {"status": "completed", "progress": 100, "message": "done"})
+    monkeypatch.setattr(review_api, "get_documents_by_ids", lambda db, document_ids: documents)
+
+    result = asyncio.run(review_api.list_reviews(db=None))
+    summary = json.loads(result[0]["summary"])
+
+    assert summary["total"] == 86
+    assert summary["serious"] == 8
+    assert "ai_review" not in summary
+    assert "pdf_page_metadata" not in summary
+    assert len(result[0]["summary"]) < 400
+
+
 def test_normalize_review_status_accepts_supported_values():
     assert review_api._normalize_review_status(None) is None
     assert review_api._normalize_review_status("all") is None
@@ -2954,6 +3068,84 @@ def test_run_chinese_human_baseline_rules_detects_temperature_range():
     assert any(issue["rule"] == "CYY-CN-UNIT-006" for issue in issues)
 
 
+def test_run_chinese_human_baseline_rules_detects_compact_temperature_range():
+    issues = review_api._run_chinese_human_baseline_rules("试剂储存条件为 2℃~8℃。")
+
+    hits = [issue for issue in issues if issue["rule"] == "CYY-CN-FMT-001"]
+    assert hits and hits[0]["original_text"] == "2℃~8℃"
+
+
+def test_run_chinese_human_baseline_rules_detects_storage_capacity_unit_spacing():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "960GB/SATA3.0/2.5 寸/企业级×2；7.68TB 企业级NL-SAS HDD。"
+    )
+
+    got = {issue["original_text"] for issue in issues if issue["rule"] == "CYY-CN-FMT-004"}
+    assert got == {"960GB", "7.68TB"}
+
+
+def test_run_chinese_human_baseline_rules_detects_min_and_bp_unit_spacing():
+    issues = review_api._run_chinese_human_baseline_rules("建库耗时约54min；读长＞300bp。")
+
+    pairs = {(issue["rule"], issue["original_text"]) for issue in issues}
+    assert ("CYY-CN-FMT-005", "54min") in pairs
+    assert ("CYY-CN-FMT-006", "300bp") in pairs
+
+
+def test_run_chinese_human_baseline_rules_detects_space_before_fullwidth_paren():
+    issues = review_api._run_chinese_human_baseline_rules("外观尺寸 600 mm （宽）。")
+
+    assert any(issue["rule"] == "CYY-CN-FMT-007" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_halfwidth_colon_after_chinese():
+    issues = review_api._run_chinese_human_baseline_rules("登录界面:请输入用户名。")
+
+    assert any(
+        issue["rule"] == "CYY-CN-PUNC-003" and issue["original_text"] == "面:"
+        for issue in issues
+    )
+
+
+def test_run_chinese_human_baseline_rules_detects_mismatched_bracket_pair():
+    issues = review_api._run_chinese_human_baseline_rules("外观尺寸（见附录)与样品架(见附录）。")
+
+    pairs = {(issue["rule"], issue["original_text"]) for issue in issues}
+    assert ("CYY-CN-PUNC-004", "（见附录)") in pairs
+    assert ("CYY-CN-PUNC-004", "(见附录）") in pairs
+
+
+def test_run_chinese_human_baseline_rules_allows_consistent_halfwidth_brackets():
+    # 英文/型号语境的半角括号与中文全角括号配对均属合法，不得误报
+    issues = review_api._run_chinese_human_baseline_rules(
+        "使用 DNBSEQ-G400RS(StandardMPS 2.0) 平台；外观尺寸（宽×深×高）。"
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-PUNC-004" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_workpace_and_sequencetat_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "打开【Workpace】文件夹下的 Sequencetat.txt 文件。"
+    )
+
+    rules = {issue["rule"] for issue in issues}
+    assert "CYY-CN-SPELL-007" in rules
+    assert "CYY-CN-SPELL-008" in rules
+
+
+def test_run_chinese_human_baseline_rules_detects_redundant_output_phrase():
+    issues = review_api._run_chinese_human_baseline_rules("平均数据产出数据量会随文库类型变化。")
+
+    assert any(issue["rule"] == "CYY-CN-REDUNDANCY-004" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_waste_container_term_drift():
+    issues = review_api._run_chinese_human_baseline_rules("废液存储组件用于收集废液。")
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-032" for issue in issues)
+
+
 def test_run_chinese_human_baseline_rules_detects_navigation_entry_mismatch():
     issues = review_api._run_chinese_human_baseline_rules(
         "系统管理模块 点击左侧导航栏的【物料管理】，默认进入用户管理界面。"
@@ -3386,7 +3578,9 @@ def test_review_ai_chunk_timeout_seconds_uses_higher_default_for_large_chunks(mo
 
     timeout = review_api._review_ai_chunk_timeout_seconds("A" * 3000)
 
-    assert timeout == 50.0
+    # main 已把默认基础超时提高到 300s；大 chunk 的语义是"不低于 50s 下限"
+    assert timeout >= 50.0
+    assert timeout >= review_api._review_ai_chunk_timeout_seconds("A" * 100)
 
 
 def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):

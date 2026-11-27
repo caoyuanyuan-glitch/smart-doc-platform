@@ -5,17 +5,22 @@
         <h2 class="page-title">知识库问答</h2>
         <p class="page-subtitle">点一张意向卡片框定检索范围，或直接提问检索写作规范与资源库</p>
       </div>
-      <el-button v-if="inChat" class="back-home-btn" @click="backToScenes">
-        <el-icon><ArrowLeft /></el-icon>
-        返回主页
-      </el-button>
+      <div class="qa-hero-actions">
+        <el-button v-if="inChat" class="back-home-btn" @click="backToScenes">
+          <el-icon><ArrowLeft /></el-icon>
+          返回主页
+        </el-button>
+        <el-button v-else-if="userStore.isAdmin" @click="cardManagerVisible = true">
+          管理卡片
+        </el-button>
+      </div>
     </header>
 
     <div v-if="!inChat" class="qa-home">
       <section class="home-main">
         <div class="scene-grid">
           <button
-            v-for="card in HOME_SCENE_CARDS"
+            v-for="card in homeSceneCards"
             :key="card.key"
             class="scene-card"
             :style="{ '--accent': card.accent }"
@@ -26,9 +31,15 @@
             <span class="scene-mark" aria-hidden="true"></span>
             <span class="scene-kicker">{{ card.kicker }}</span>
             <h3 class="scene-title">{{ card.title }}</h3>
-            <p class="scene-desc">{{ card.desc }}</p>
+            <p class="scene-desc">{{ card.description }}</p>
             <span class="scene-meta">{{ sceneDocLabel(card) }}</span>
           </button>
+        </div>
+        <div v-if="!treeLoading && !homeSceneCards.length" class="scene-empty">
+          <p>暂无首页卡片</p>
+          <el-button v-if="userStore.isAdmin" size="small" type="primary" @click="cardManagerVisible = true">
+            去创建
+          </el-button>
         </div>
 
         <div class="recent-ask">
@@ -266,6 +277,8 @@
         <el-button type="primary" @click="submitFeedback">提交反馈</el-button>
       </template>
     </el-dialog>
+
+    <QaCardManager v-model="cardManagerVisible" :tree-data="treeData" @changed="handleCardsChanged" />
   </div>
 </template>
 
@@ -275,77 +288,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { qaAPI, knowledgeAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
+import QaCardManager from '@/components/QaCardManager.vue'
 import { User, Microphone, CopyDocument, Download, ArrowDown, ArrowLeft, Plus } from '@element-plus/icons-vue'
 
 const AGENT_KB_NAME = 'AI agent知识库'
 
-const SCENE_CARDS = [
-  // paths 必须与 backend/app/utils/qa_scenes.py 中 QA_SCENES 保持一致
-  {
-    key: 'style',
-    kicker: '写作规范',
-    title: '查规范与自检',
-    desc: '风格约定、常见错误、Checklist 与发布前核对项',
-    accent: '#1d4ed8',
-    paths: [
-      ['写作规范', '写作风格指南'],
-      ['写作规范', '常见错误清单'],
-      ['写作规范', '技术文档审核规则库'],
-      ['写作规范', '说明书自检checklist'],
-      ['写作规范', '审核依据汇总']
-    ],
-    suggestions: [
-      '中文技术文档标题和术语该怎么写',
-      '发布前我应该按哪些项做自检',
-      '说明书审核时要重点核对什么'
-    ]
-  },
-  {
-    key: 'phrase',
-    kicker: '句式与记忆',
-    title: '找句式和译法',
-    desc: '说明书可套用的表达，以及已审核的中英对照',
-    accent: '#0f766e',
-    paths: [
-      ['写作规范', '句式清单'],
-      ['资源库', '记忆库']
-    ],
-    suggestions: [
-      '建库试剂说明书常用句式有哪些',
-      '这段中文在记忆库里有没有现成译法',
-      '记忆库里有哪些可复用的句对'
-    ]
-  },
-  {
-    key: 'term',
-    kicker: '术语库',
-    title: '查术语',
-    desc: '产品、模块与流程的标准译名和对照表',
-    accent: '#be123c',
-    paths: [['资源库', '术语库']],
-    suggestions: [
-      '这个术语的标准译名是什么',
-      '自动化相关术语有哪些对照',
-      '平台反馈过哪些术语需要统一'
-    ]
-  },
-  {
-    key: 'files',
-    home: false,
-    kicker: '文件资料',
-    title: '找文件资料',
-    desc: '说明书、手册和产品介绍等原始资料',
-    accent: '#334155',
-    paths: [['资源库', '文件资料']],
-    suggestions: [
-      '这份说明书的主要内容是什么',
-      '产品介绍里强调了哪些功能',
-      '培训手册应该从哪一节开始读'
-    ]
-  }
-]
-
-const HOME_SCENE_CARDS = SCENE_CARDS.filter(card => card.home !== false)
+const sceneCards = ref([])
+const cardManagerVisible = ref(false)
+const homeSceneCards = computed(() => sceneCards.value.filter(card => card.home_visible !== false))
 
 const GLOBAL_SUGGESTIONS = [
   '中文技术文档写作有哪些必须遵守的规范',
@@ -361,6 +311,7 @@ const loading = ref(false)
 const chatBox = ref(null)
 const treeData = ref([])
 const treeLoading = ref(false)
+const folderNodeMap = ref({})
 const activeScene = ref(null)
 const askedUnscoped = ref(false)
 
@@ -405,44 +356,54 @@ const userStore = useUserStore()
 const sessionId = ref(null)
 const sessionList = ref([])
 
-function findNodeByPath(nodes, parts) {
-  let list = nodes || []
-  let node = null
-  for (const part of parts) {
-    node = list.find(item => item.name === part) || null
-    if (!node) return null
-    list = node.children || []
-  }
-  return node
+function resolveSceneFolderIds(card) {
+  return (card.folder_ids || []).filter(folderId => folderNodeMap.value[folderId])
 }
 
-function resolveSceneFolderIds(card) {
+function collectReadableSubtreeIds(folderId) {
+  const root = folderNodeMap.value[folderId]
+  if (!root) return []
   const ids = []
-  for (const path of card.paths) {
-    const node = findNodeByPath(treeData.value, path)
-    if (node) ids.push(node.id)
+  const walk = (node) => {
+    if (!node) return
+    if (node.readable) ids.push(node.id)
+    for (const child of node.children || []) walk(child)
   }
+  walk(root)
   return ids
+}
+
+function sceneEffectiveFolderIds(card) {
+  const ids = new Set()
+  for (const folderId of resolveSceneFolderIds(card)) {
+    for (const childId of collectReadableSubtreeIds(folderId)) {
+      ids.add(childId)
+    }
+  }
+  return [...ids]
 }
 
 function sceneDocCount(card) {
   let count = 0
-  for (const path of card.paths) {
-    const node = findNodeByPath(treeData.value, path)
-    count += node?.docCount || 0
+  for (const folderId of sceneEffectiveFolderIds(card)) {
+    count += folderNodeMap.value[folderId]?.directCount || 0
   }
   return count
 }
 
 function sceneDocLabel(card) {
   if (treeLoading.value) return '正在读取知识库...'
+  const selected = resolveSceneFolderIds(card)
+  if (!selected.length) {
+    return (card.folder_ids || []).length ? '目录待同步' : '暂无可检索资料'
+  }
   const count = sceneDocCount(card)
-  return count > 0 ? `${count} 份资料` : '目录待同步'
+  return count > 0 ? `${count} 份资料` : '暂无资料'
 }
 
 function currentKnowledgeIds() {
   if (!activeScene.value) return []
-  return resolveSceneFolderIds(activeScene.value)
+  return sceneEffectiveFolderIds(activeScene.value)
 }
 
 function greetingForScope() {
@@ -512,15 +473,15 @@ function enterScene(card) {
     ElMessage.info('知识库目录加载中，请稍候')
     return
   }
-  const ids = resolveSceneFolderIds(card)
+  const ids = sceneEffectiveFolderIds(card)
   if (!ids.length) {
-    ElMessage.warning('该场景对应的知识目录暂不可用，请先同步知识库')
+    ElMessage.warning('该卡片在当前权限范围内暂无可用资料')
     return
   }
   activeScene.value = card
   askedUnscoped.value = false
   resetMessages(true)
-  displaySuggestions.value = [...card.suggestions]
+  displaySuggestions.value = [...(card.suggestions || [])]
   fetchInitialSuggestions()
   nextTick(() => scrollToBottom())
 }
@@ -586,11 +547,13 @@ async function loadSession(id) {
 
 onMounted(() => {
   loadKnowledgeTree()
+  loadCards()
   loadSessionList()
 })
 
 watch(() => route.path, () => {
   loadKnowledgeTree()
+  loadCards()
 })
 
 async function loadKnowledgeTree() {
@@ -598,11 +561,34 @@ async function loadKnowledgeTree() {
   try {
     const resp = await knowledgeAPI.getTree()
     const rawTree = (resp.data || []).filter(node => node.name !== AGENT_KB_NAME)
-    treeData.value = transformTreeData(rawTree)
+    const map = {}
+    treeData.value = transformTreeData(rawTree, map)
+    folderNodeMap.value = map
   } catch (e) {
     ElMessage.warning(getKnowledgeLoadErrorMessage(e))
   }
   treeLoading.value = false
+}
+
+async function loadCards() {
+  try {
+    const resp = await qaAPI.getCards()
+    sceneCards.value = resp.data?.cards || []
+  } catch {
+    sceneCards.value = []
+    ElMessage.warning('问答卡片加载失败')
+  }
+}
+
+async function handleCardsChanged() {
+  await loadCards()
+  if (!activeScene.value) return
+  const updated = sceneCards.value.find(card => card.key === activeScene.value.key)
+  if (updated) {
+    activeScene.value = updated
+  } else {
+    backToScenes()
+  }
 }
 
 function countRecursiveDocs(node) {
@@ -615,15 +601,22 @@ function countRecursiveDocs(node) {
   return count
 }
 
-function transformTreeData(nodes) {
+function transformTreeData(nodes, map = {}) {
   return (nodes || []).map(node => {
     const docCount = countRecursiveDocs(node)
-    return {
+    const actions = node.actions || []
+    const item = {
       id: node.id,
       name: node.name,
       docCount,
-      children: node.children && node.children.length ? transformTreeData(node.children) : []
+      directCount: (node.files || []).length,
+      actions,
+      readable: actions.includes('read'),
+      children: []
     }
+    map[item.id] = item
+    item.children = node.children && node.children.length ? transformTreeData(node.children, map) : []
+    return item
   })
 }
 
@@ -632,7 +625,7 @@ async function sendQuestion(q) {
   if (!text) return
   const ids = currentKnowledgeIds()
   if (activeScene.value && ids.length === 0) {
-    ElMessage.warning('该场景对应的知识目录暂不可用')
+    ElMessage.warning('该卡片在当前权限范围内暂无可用资料')
     return
   }
   if (!inChat.value) {
@@ -1026,6 +1019,12 @@ function scrollToBottom() {
   margin-bottom: 14px;
 }
 
+.qa-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .page-title {
   font-size: 26px;
   font-weight: 650;
@@ -1073,8 +1072,24 @@ function scrollToBottom() {
 
 .scene-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 12px;
+}
+
+.scene-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 120px;
+  border: 1px dashed #e7e5e4;
+  border-radius: 14px;
+  color: #94a3b8;
+  background: #fffdf9;
+}
+
+.scene-empty p {
+  margin: 0;
 }
 
 .scene-card {

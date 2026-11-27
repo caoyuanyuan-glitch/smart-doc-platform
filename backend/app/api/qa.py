@@ -25,7 +25,16 @@ from app.database import get_db
 from app.models.qa_feedback import QaFeedback
 from app.models.qa_history import QaSession, QaMessage
 from app.schemas.qa_feedback import QaFeedbackCreate, QaFeedbackOut
-from app.api.auth import get_current_user, oauth2_scheme, require_admin
+from app.api.auth import get_current_active_user, get_current_user, oauth2_scheme, require_admin
+from app.utils.knowledge_access import is_admin, resolve_qa_scope, visible_folder_actions
+from app.utils.qa_cards import (
+    build_card_key,
+    card_to_dict,
+    dump_suggestions,
+    next_sort_order,
+    normalize_card_payload,
+    replace_card_folders,
+)
 from app.utils.knowledge_usage import MODULE_QA, record_knowledge_file_call
 from app.utils.file_utils import read_file_safe
 
@@ -137,6 +146,21 @@ class GeneralQAInput(BaseModel):
     question: str
     knowledge_ids: list = []
     session_id: Optional[int] = None
+
+
+class QaCardPayload(BaseModel):
+    kicker: str = ""
+    title: str = ""
+    description: str = ""
+    accent: str = "#1d4ed8"
+    suggestions: list = []
+    folder_ids: list = []
+    home_visible: bool = True
+    sort_order: Optional[int] = None
+
+
+class QaCardOrderInput(BaseModel):
+    card_ids: list = []
 
 
 QA_STOPWORDS = {
@@ -920,41 +944,25 @@ AI的回答摘要：{answer[:2000]}
 
 # ─── 知识库问答 ────────────────────────────────────────────
 
-def _load_qa_documents(db, knowledge_ids):
-    """Collect QA documents. Empty knowledge_ids searches all user folders and always skips AI agent KB."""
+def _load_qa_documents(db, folder_ids):
+    """Collect QA documents from an already permission-filtered folder scope."""
     from app.models.knowledge import Folder
     from app.crud.knowledge import get_folder_files
-    from app.utils.qa_knowledge_scope import folder_path_names, is_agent_kb_folder, user_root_folder_ids
-
-    def _collect_files_recursive(folder_id):
-        files = []
-        folder = db.query(Folder).filter(Folder.id == folder_id).first()
-        if not folder or is_agent_kb_folder(folder):
-            return files
-        folder_path = folder_path_names(folder)
-        for item in get_folder_files(db, folder_id):
-            item["_folder_path"] = folder_path
-            files.append(item)
-        for child in folder.children:
-            files.extend(_collect_files_recursive(child.id))
-        return files
-
-    folder_ids = []
-    if knowledge_ids:
-        for fid in knowledge_ids:
-            try:
-                folder_ids.append(int(fid))
-            except (TypeError, ValueError):
-                continue
-    else:
-        roots = db.query(Folder).filter(Folder.parent_id.is_(None)).all()
-        folder_ids = user_root_folder_ids(roots)
+    from app.utils.qa_knowledge_scope import folder_path_names, is_agent_kb_folder
 
     documents = []
     seen = set()
-    for fid in folder_ids:
+    for raw_id in folder_ids or []:
         try:
-            for f in _collect_files_recursive(fid):
+            fid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        try:
+            folder = db.query(Folder).filter(Folder.id == fid).first()
+            if not folder or is_agent_kb_folder(folder):
+                continue
+            folder_path = folder_path_names(folder)
+            for f in get_folder_files(db, fid):
                 fid_unique = f.get("id")
                 if fid_unique in seen:
                     continue
@@ -968,11 +976,11 @@ def _load_qa_documents(db, knowledge_ids):
                     record_knowledge_file_call(fid_unique, MODULE_QA, int((time.perf_counter() - started) * 1000))
                     if _normalize_text(content):
                         documents.append({
-                            "document_id": fid_unique,
-                            "title": file_name,
-                            "content": content,
-                            "folder_path": f.get("_folder_path", ""),
-                        })
+                        "document_id": fid_unique,
+                        "title": file_name,
+                        "content": content,
+                        "folder_path": folder_path,
+                    })
         except Exception:
             continue
     return documents
@@ -982,14 +990,15 @@ def _load_qa_documents(db, knowledge_ids):
 async def ask_general_question(
     input_data: GeneralQAInput,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    current_user = Depends(get_current_active_user),
 ):
     started = time.perf_counter()
     question = (input_data.question or "").strip()
     knowledge_ids = input_data.knowledge_ids or []
-    user_id = _get_user_id_from_token(token, db)
+    user_id = current_user.id
 
-    documents = _load_qa_documents(db, knowledge_ids)
+    scope_ids = resolve_qa_scope(db, current_user, knowledge_ids)
+    documents = _load_qa_documents(db, scope_ids)
     if not documents:
         result = {
             "answer": "当前知识范围内没有可用文档。请换一个场景，或检查写作规范 / 资源库是否已同步。",
@@ -1035,7 +1044,7 @@ async def get_initial_suggestions(
     kb_ids: str = Query("", description="已勾选的知识库ID列表，逗号分隔"),
     limit: int = Query(4, description="返回数量，默认4，最大8"),
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    current_user = Depends(get_current_active_user),
 ):
     limit = min(max(limit, 1), 8)
     kb_id_list = [x.strip() for x in kb_ids.split(",") if x.strip()] if kb_ids else []
@@ -1043,7 +1052,8 @@ async def get_initial_suggestions(
     if not kb_id_list:
         return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
 
-    documents = _load_qa_documents(db, kb_id_list)
+    scope_ids = resolve_qa_scope(db, current_user, kb_id_list)
+    documents = _load_qa_documents(db, scope_ids)
     if not documents:
         return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
 
@@ -1402,6 +1412,139 @@ async def delete_qa_session(
     return {"message": "已删除"}
 
 
+# ─── 问答卡片 ──────────────────────────────
+
+@router.get("/cards")
+async def list_qa_cards(
+    include_hidden: bool = Query(False, description="管理员查看隐藏卡片时传 true"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    from app.models.qa_card import QaCard
+
+    if include_hidden and not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
+
+    query = db.query(QaCard)
+    if not include_hidden:
+        query = query.filter(QaCard.home_visible.is_(True))
+    cards = query.order_by(QaCard.sort_order.asc(), QaCard.id.asc()).all()
+
+    visible = visible_folder_actions(db, current_user)
+    result = []
+    for card in cards:
+        folder_ids = [row.folder_id for row in card.folders if row.folder_id in visible]
+        result.append(card_to_dict(card, folder_ids))
+    return {"cards": result}
+
+
+@router.post("/cards")
+async def create_qa_card(
+    payload: QaCardPayload,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin),
+):
+    from app.models.qa_card import QaCard
+
+    try:
+        data = normalize_card_payload(db, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if data["sort_order"] is None:
+        data["sort_order"] = next_sort_order(db)
+
+    card = QaCard(
+        key=build_card_key(),
+        kicker=data["kicker"],
+        title=data["title"],
+        description=data["description"],
+        accent=data["accent"],
+        suggestions_json=dump_suggestions(data["suggestions"]),
+        home_visible=data["home_visible"],
+        sort_order=data["sort_order"],
+        created_by=getattr(current_user, "id", None),
+    )
+    db.add(card)
+    db.flush()
+    replace_card_folders(db, card, data["folder_ids"])
+    db.commit()
+    db.refresh(card)
+    return card_to_dict(card)
+
+
+@router.put("/cards/order")
+async def reorder_qa_cards(
+    payload: QaCardOrderInput,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    from app.models.qa_card import QaCard
+
+    cards = db.query(QaCard).all()
+    existing = {card.id for card in cards}
+    ids = []
+    for item in payload.card_ids or []:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="排序列表包含无效卡片")
+    if len(ids) != len(existing) or set(ids) != existing:
+        raise HTTPException(status_code=400, detail="排序列表与现有卡片不一致")
+
+    card_map = {card.id: card for card in cards}
+    for index, card_id in enumerate(ids, start=1):
+        card_map[card_id].sort_order = index * 10
+    db.commit()
+    return {"message": "排序已保存", "card_ids": ids}
+
+
+@router.put("/cards/{card_id}")
+async def update_qa_card(
+    card_id: int,
+    payload: QaCardPayload,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    from app.models.qa_card import QaCard
+
+    card = db.query(QaCard).filter(QaCard.id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    try:
+        data = normalize_card_payload(db, payload.model_dump(), card)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    card.kicker = data["kicker"]
+    card.title = data["title"]
+    card.description = data["description"]
+    card.accent = data["accent"]
+    card.suggestions_json = dump_suggestions(data["suggestions"])
+    card.home_visible = data["home_visible"]
+    card.sort_order = data["sort_order"]
+    replace_card_folders(db, card, data["folder_ids"])
+    db.commit()
+    db.refresh(card)
+    return card_to_dict(card)
+
+
+@router.delete("/cards/{card_id}")
+async def delete_qa_card(
+    card_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    from app.models.qa_card import QaCard
+
+    card = db.query(QaCard).filter(QaCard.id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    db.delete(card)
+    db.commit()
+    return {"message": "卡片已删除"}
+
+
 # ─── 统计面板 ──────────────────────────────
 
 @router.get("/scenes/sources")
@@ -1424,11 +1567,16 @@ async def get_scene_sources(
                 "updated_at": _to_beijing_iso(item["updated_at"]),
             })
         scenes.append({
+            "id": scene["id"],
             "key": scene["key"],
             "kicker": scene["kicker"],
             "title": scene["title"],
+            "description": scene["description"],
+            "accent": scene["accent"],
+            "home_visible": scene["home_visible"],
+            "sort_order": scene["sort_order"],
+            "folder_count": scene["folder_count"],
             "file_count": scene["file_count"],
-            "missing_paths": scene["missing_paths"],
             "files": files,
         })
     return {"scenes": scenes}

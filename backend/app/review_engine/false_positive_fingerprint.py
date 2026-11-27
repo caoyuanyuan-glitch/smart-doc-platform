@@ -287,6 +287,55 @@ PRESET_PATTERNS: dict[str, PresetPattern] = {
         "forbid_blob": r"拼写错误|应为.*mgitech",
         "language": None,
     },
+    # ------------------------------------------------------------------
+    # 以下 4 条来自 goldset6 首轮验证（2026-11-25）人工裁定回流：
+    # AI 独有 149 条裁定 134 条误报，聚类为 4 类高频模式。
+    # 均为 AI 产出（rule 为空），命中只标记 possible_false_positive。
+    # ------------------------------------------------------------------
+    # FP-G6-ICON-UI-001 UI 对象缺失指控（图标占位在文本层为空，提取伪影）
+    # 样例原文：「点击【测序方案】信息框的 ，选择…」「轻按 ，芯驱自动弹出」
+    "FP-G6-ICON-UI-001": {
+        "families": set(),
+        "allow_empty_family": True,
+        "require_blob": (
+            r"ui\s*对象缺失|ui\s*object\s*(is\s+)?missing|操作对象缺失"
+            r"|无法判断点击对象|无法判断.{0,10}点击|which\s+button/icon"
+            r"|user cannot know which button"
+        ),
+        "forbid_blob": r"正文明确标注按钮名|button\s*name\s*(is|:)|渲染页已核实",
+        "language": None,
+    },
+    # FP-G6-TABLE-RUN-001 表格对齐/完整性指控（表格行连写进文本层造成伪影）
+    # 样例描述：「表头与数据列对齐，明确各温度条件对应的时长」「rows lack required values」
+    "FP-G6-TABLE-RUN-001": {
+        "families": set(),
+        "allow_empty_family": True,
+        "require_blob": (
+            r"表头与数据列对齐|列与数据对应关系不清晰|表格列与数据对应"
+            r"|对应关系不明确|表头声明了.{0,40}未见对应|仅有表头字段名"
+            r"|rows?\s+lack\s+required\s+values|无法判断哪个.{0,8}对应哪个"
+        ),
+        "forbid_blob": r"渲染页已核实表格|真实缺失数据值|单元格确为空",
+        "language": None,
+    },
+    # FP-G6-TERM-KB-001 术语凭常识改写（AI 以自身知识断「A 应为 B」，术语库无此映射）
+    # 样例：「试剂槽应为试剂仓」「应使用标准法规措辞」。必须同时满足类别+应为两个特征。
+    "FP-G6-TERM-KB-001": {
+        "families": set(),
+        "allow_empty_family": True,
+        "require_blob_all": [r"术语", r"应为"],
+        "forbid_blob": r"术语库|glossary|与术语库不一致|与术语库不符|术语表标注",
+        "language": None,
+    },
+    # FP-G6-PROC-DATE-001 审批日期字段未填（批准/生效/修改日期由发布流程填写）
+    # 与用户裁定一致：送审稿/出版稿的日期占位不算文档缺陷；真实日期错误仍照报。
+    "FP-G6-PROC-DATE-001": {
+        "families": set(),
+        "allow_empty_family": True,
+        "require_blob_all": [r"批准日期|生效日期|修改日期", r"未填|未标注|空白|均未"],
+        "forbid_blob": r"日期前后不一致|日期格式错误|日期逻辑矛盾|生效日期晚于",
+        "language": None,
+    },
 }
 
 
@@ -331,6 +380,14 @@ def match_preset_pattern(issue: Any, *, language: str | None = None) -> str | No
             continue
         require = pattern.get("require_blob")
         if require and not re.search(require, blob_low, re.IGNORECASE):
+            continue
+        # require_blob_all：多条特征同时命中才算（AND 语义）。
+        # goldset6 人工裁定回流需要"类别限定 + 描述特征"的组合条件，
+        # 单条正则表达不了「术语 且 应为」这类语义。
+        require_all = pattern.get("require_blob_all")
+        if require_all and not all(
+            re.search(cond, blob_low, re.IGNORECASE) for cond in require_all
+        ):
             continue
         forbid = pattern.get("forbid_blob")
         if forbid and re.search(forbid, blob_low, re.IGNORECASE):

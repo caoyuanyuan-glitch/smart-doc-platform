@@ -1,7 +1,7 @@
 # QA Scene Source List
 
 Feature Name: qa-scene-source-list
-Updated: 2026-11-23
+Updated: 2026-11-25
 
 ## Description
 
@@ -59,6 +59,7 @@ graph TD
       "key": "style",
       "kicker": "写作规范",
       "title": "查写作规范与风格",
+      "folder_count": 2,
       "file_count": 2,
       "missing_paths": [],
       "files": [
@@ -87,9 +88,13 @@ graph TD
 - 菜单文案由「问答看板」改为「统计面板」，页面标题同步改为「统计面板」
 - 路由保持 `/qa/dashboard`
 - 管理员在图表下方、对话明细上方看到「知识库问答资料清单」
-- 按板块分段，每段标题旁显示资料份数；表格列为文件名、所属目录、类型、更新时间
+- 按板块分段，每段标题旁显示目录数量和资料份数；表格列为文件名、所属目录、类型、更新时间
 - 空态：板块无文件时显示「该板块暂无资料」；若有 `missing_paths` 附加「目录待同步」
 - 点击行：`router.push({ path: '/knowledge/' + folder_id, query: { preview: file_id } })`
+- 清单区块展开时每 10 秒静默拉取一次；页面不可见或区块收起时暂停轮询
+- 展开区块、窗口重新获得焦点、浏览器标签页重新可见时立即静默刷新一次
+- 静默刷新失败时保留上一次成功数据，手动刷新失败时展示错误文案
+- 标题旁展示最近一次成功刷新时间
 
 `frontend/src/api/index.js` 增加 `qaAPI.getSceneSources()`。
 
@@ -107,7 +112,7 @@ graph TD
 
 - `QaScene`: `key`, `kicker`, `title`, `paths: list[list[str]]`
 - `QaSceneFile`: `id`, `name`, `folder_id`, `folder_path`, `file_type`, `updated_at`
-- `QaSceneInventory`: `key`, `kicker`, `title`, `file_count`, `missing_paths`, `files`
+- `QaSceneInventory`: `key`, `kicker`, `title`, `folder_count`, `file_count`, `missing_paths`, `files`
 
 `updated_at` 使用知识库文件已有时间戳，ISO 8601 字符串输出。
 

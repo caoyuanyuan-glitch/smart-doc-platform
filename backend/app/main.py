@@ -157,6 +157,18 @@ async def startup_event():
     except Exception as e:
         print(f"[startup] 知识库种子初始化失败: {e}")
     try:
+        from app.database import SessionLocal
+        from app.utils.qa_scenes import seed_default_qa_cards
+        db = SessionLocal()
+        try:
+            seeded_count = seed_default_qa_cards(db)
+            if seeded_count:
+                print(f"[startup] 已初始化 {seeded_count} 张问答卡片")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[startup] 问答卡片初始化失败: {e}")
+    try:
         from seed.polished_seed import cleanup_orphan_polished_documents, seed_polished_documents
         cleanup_orphan_polished_documents()
         seed_polished_documents()

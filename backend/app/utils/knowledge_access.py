@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models.knowledge import Folder, UserKnowledgeGrant
 from app.models.user import User
-from app.utils.qa_knowledge_scope import is_user_visible_folder
+from app.utils.qa_knowledge_scope import is_agent_kb_folder, is_user_visible_folder
 
 ACTION_READ = "read"
 ACTION_PREVIEW = "preview"
@@ -123,6 +123,51 @@ def visible_folder_actions(db: Session, user) -> dict:
                 visible[parent_id] = set()
             current = folder_by_id.get(parent_id)
     return visible
+
+
+def resolve_qa_scope(db: Session, user, requested_ids=None) -> list:
+    """Resolve QA folder scope to folders the user can read.
+
+    Requested parent folders are expanded recursively, then intersected with
+    readable folders. Ungranted siblings are never included.
+    """
+    folder_by_id = load_folder_index(db)
+    children = {}
+    for folder in folder_by_id.values():
+        children.setdefault(folder.parent_id, []).append(folder.id)
+
+    visible = visible_folder_actions(db, user)
+    allowed = {
+        folder_id
+        for folder_id, actions in visible.items()
+        if ACTION_READ in actions
+        and folder_id in folder_by_id
+        and not is_agent_kb_folder(folder_by_id[folder_id])
+    }
+    if not requested_ids:
+        return sorted(allowed)
+
+    scope = set()
+    seen = set()
+    stack = []
+    for raw in requested_ids:
+        try:
+            folder_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if folder_id in folder_by_id:
+            stack.append(folder_id)
+
+    while stack:
+        folder_id = stack.pop()
+        if folder_id in seen:
+            continue
+        seen.add(folder_id)
+        if folder_id in allowed:
+            scope.add(folder_id)
+        for child_id in children.get(folder_id, []):
+            stack.append(child_id)
+    return sorted(scope)
 
 
 def filter_tree_nodes(nodes, visible_actions: dict) -> list:

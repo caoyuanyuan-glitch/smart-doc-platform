@@ -31,6 +31,7 @@ from app.utils.official_manual import (
     extract_search_keywords,
     filter_manuals_by_keywords,
     filter_manuals_by_lang,
+    has_cached_en_pdf,
     OfficialSearchError,
     needs_user_choice_for_keywords,
     normalize_site,
@@ -42,6 +43,21 @@ from app.utils.official_manual import (
 )
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
+
+
+def _offline_pdf_unavailable(picked: List[dict], user_key: str) -> bool:
+    """缓存的英文索引命中了手册，但本地没有对应 PDF 且未解析过。"""
+    uploads = UPLOAD_SESSIONS.get(user_key, {})
+    for item in picked:
+        if not item.get("_cached"):
+            continue
+        record = uploads.get(cache_file_id(item))
+        if record and record.get("pages"):
+            continue
+        files = item.get("files") or ""
+        if "global-mgitech.com" in files and not has_cached_en_pdf(files):
+            return True
+    return False
 
 logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -755,14 +771,18 @@ async def query_official_manual(
             miss_message = "未找到指定说明书，请重新选择或改问。"
         else:
             selected_meta = picked
-            try:
-                documents = [_materialize_official(item, user_key) for item in picked]
-            except HTTPException:
-                raise
-            except Exception:
-                logger.exception("download/parse official manual failed")
+            if _offline_pdf_unavailable(picked, user_key):
                 status = "miss"
-                miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
+                miss_message = "离线缓存命中了手册索引，但本地还没有该 PDF。联网后会自动缓存，也可直接上传说明书继续问。"
+            else:
+                try:
+                    documents = [_materialize_official(item, user_key) for item in picked]
+                except HTTPException:
+                    raise
+                except Exception:
+                    logger.exception("download/parse official manual failed")
+                    status = "miss"
+                    miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
     elif sess_data.get("documents") and (not product or product == sess_data.get("product")) and site == sess_data.get("site", "zh"):
         documents = sess_data.get("documents") or []
         selected_meta = sess_data.get("official_items") or []
@@ -791,14 +811,18 @@ async def query_official_manual(
                     miss_message = f"电子说明书库未找到与「{keyword}」匹配的说明书。可改型号后再试，或补充说明书后继续问。"
             else:
                 selected_meta = picked
-                try:
-                    documents = [_materialize_official(item, user_key) for item in picked]
-                except HTTPException:
-                    raise
-                except Exception:
-                    logger.exception("download/parse official manual failed")
+                if _offline_pdf_unavailable(picked, user_key):
                     status = "miss"
-                    miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
+                    miss_message = "离线缓存命中了手册索引，但本地还没有该 PDF。联网后会自动缓存，也可直接上传说明书继续问。"
+                else:
+                    try:
+                        documents = [_materialize_official(item, user_key) for item in picked]
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        logger.exception("download/parse official manual failed")
+                        status = "miss"
+                        miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
 
     titles = [d.get("title", "") for d in documents] if documents else [m.get("title", "") for m in selected_meta]
     summary_title = _session_title(question, product)

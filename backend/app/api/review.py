@@ -52,12 +52,22 @@ from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.services.terminology import load_terminology, resolve_terminology_path, run_term_check_v2
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.review_engine.unit_spacing import check_units_and_spacing
-from app.review_engine.bilingual_compare import build_bilingual_rows, detect_language as detect_bilingual_language
+from app.review_engine.bilingual_compare import detect_language as detect_bilingual_language
 from app.review_engine.bilingual_audit import run_bilingual_audit
 from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
 from app.review_engine.cn_typo import check_cn_typos
 from app.review_engine.learned_patch import check_learned_patches
+from app.review_engine.bilingual_align import (
+    bilingual_value_status as align_bilingual_value_status,
+    bilingual_values_match as align_bilingual_values_match,
+    build_bilingual_rows as build_bilingual_align_rows,
+    detect_doc_language as align_detect_doc_language,
+    extract_flow_profile as extract_bilingual_flow_profile,
+    is_bilingual_compare,
+    language_label as align_language_label,
+    summarize_flow_profile as summarize_bilingual_flow_profile,
+)
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -102,6 +112,11 @@ REVIEW_BASIS_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "中文说明书写作Checklist.xlsx",
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "英文说明书写作Checklist.xlsx",
     PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json",
+    # 本地兜底规范副本（审核依据目录）；路径不存在时 stat 失败自动跳过。
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "中文技术文档写作风格指南.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "MGI英文技术文档写作风格指南.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "技术文档常见错误清单与规范.md",
+    Path(os.getenv("REVIEW_WRITING_STANDARDS_DIR") or r"C:\MyFileAudit\审核工作区\审核依据") / "2026历史人工审核意见知识库.md",
 ]
 REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
@@ -939,6 +954,31 @@ def _empty_judgment_stats():
     }
 
 
+def _compact_review_list_summary(summary):
+    """Keep list payloads small; full diagnostics stay on aggregated-report."""
+    if summary in (None, ""):
+        return "{}"
+    if isinstance(summary, dict):
+        data = summary
+    else:
+        text = str(summary).strip()
+        if not text:
+            return "{}"
+        try:
+            data = json.loads(text)
+        except Exception:
+            return text[:500]
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False)
+    keep = (
+        "total", "fatal", "serious", "general", "suggestion",
+        "language", "cache_hit", "message", "step",
+        "ai_degraded", "ai_degraded_reason",
+    )
+    compact = {key: data.get(key) for key in keep if key in data}
+    return json.dumps(compact, ensure_ascii=False)
+
+
 def _judgment_stats_map(db: Session, review_ids):
     stats = {int(review_id): _empty_judgment_stats() for review_id in review_ids or []}
     if db is None or not stats:
@@ -967,11 +1007,10 @@ def _judgment_stats_map(db: Session, review_ids):
 def _serialize_review_list_item(db: Session, review, document_map, judgment_stats=None):
     review = _reconcile_review_runtime_state(db, review)
     doc = document_map.get(review.document_id)
-    review_dict = review.__dict__.copy()
+    review_dict = {key: value for key, value in review.__dict__.items() if not str(key).startswith("_")}
     review_dict['document_name'] = doc.filename if doc else ''
     review_dict['document_file_type'] = doc.file_type if doc else ''
-    if not review_dict.get('summary'):
-        review_dict['summary'] = '{}'
+    review_dict['summary'] = _compact_review_list_summary(review_dict.get('summary'))
     review_dict['progress'] = get_progress(review.id)
     review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
     return review_dict
@@ -1743,7 +1782,11 @@ def _sanitize_issue_suggestions(issues):
                 suggestion = f"{unit_match.group(1)} {unit_match.group(2)}"
                 issue['suggestion'] = suggestion
         if suggestion and not validate_suggestion(issue.get('original_text', ''), suggestion):
-            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002'}:
+            # DET-SPACE-*（数值-单位写法统计型规则）的 suggestion 是「建议统一为 X」
+            # 类全文统一动作，original 是单位符号本身（如 ℃/°C 码位替换），
+            # validate_suggestion 的原文改写校验必然判 False——属误伤，豁免。
+            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002',
+                            'DET-SPACE-UNIT', 'DET-SPACE-GAP'}:
                 issue['suggestion'] = ''
                 issue['confidence'] = max(0, int(issue.get('confidence', 0) or 0) - 10)
     return issues
@@ -1976,6 +2019,7 @@ def _should_drop_known_false_positive_issue(issue):
         from app.review_engine.ruled_false_positives import (
             is_ruled_icon_artifact,
             is_ruled_learned_patch_overfit,
+            is_ruled_politeness,
             is_ruled_table_header_concat,
             is_ruled_ui_label_grammar,
             is_ruled_unit_zh_connect,
@@ -1983,7 +2027,8 @@ def _should_drop_known_false_positive_issue(issue):
         )
         if (is_ruled_warning_template(issue) or is_ruled_icon_artifact(issue)
                 or is_ruled_table_header_concat(issue) or is_ruled_unit_zh_connect(issue)
-                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)):
+                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)
+                or is_ruled_politeness(issue)):
             return True
     except ImportError:
         pass
@@ -2753,22 +2798,62 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     return all_issues, trace
 
 
+def _ai_chunk_span_key(issue: dict):
+    """同一 AI 分块内、同一原文与规则的问题视为重复。
+
+    AI 常为同一片段的同一问题给出不同 chapter 名（如表 70/表 71），
+    标准身份键因 chapter 不同而不合并，导致列表里出现完全相同的两条。
+    """
+    position = issue.get("position")
+    if isinstance(position, str):
+        text = position.strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            position = json.loads(text)
+        except Exception:
+            return None
+    if not isinstance(position, dict):
+        return None
+    chunk_index = position.get("chunk_index")
+    if chunk_index in (None, ""):
+        return None
+    original = str(issue.get("original_text") or "").strip()
+    if not original:
+        return None
+    from app.review_engine.matching.normalize import canonical_span
+    # 不比 rule/category：AI 常把同一片段同一原文归到"结构完整/结构完整性"
+    # 或不同规则名下，标签差异不代表是两个问题。
+    return (
+        "ai-chunk",
+        str(chunk_index),
+        str(position.get("chunk_start") or ""),
+        canonical_span(original),
+    )
+
+
 def _dedup_across_chunks(issues: list) -> list:
     """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。"""
     if len(issues) <= 1:
         return issues
     from app.review_engine.matching.identity import issue_identity_key
     result = []
+    result_keys = []
     for index, issue in enumerate(issues):
         original = str(issue.get("original_text", "") or "").strip()
         if not original:
             result.append(issue)
+            result_keys.append(None)
             continue
         issue.setdefault("candidate_id", f"cand-{index}")
-        key = issue_identity_key(issue)
+        key = _ai_chunk_span_key(issue) or issue_identity_key(issue)
         matched = False
-        for existing in result:
-            if issue_identity_key(existing) != key:
+        for result_index, existing in enumerate(result):
+            existing_key = result_keys[result_index]
+            if existing_key is None:
+                existing_key = issue_identity_key(existing)
+                result_keys[result_index] = existing_key
+            if existing_key != key:
                 continue
             keep_id = existing.get("candidate_id") or existing.get("rule") or ""
             existing["dedupe_reason"] = "same_identity_key"
@@ -2779,6 +2864,7 @@ def _dedup_across_chunks(issues: list) -> list:
             break
         if not matched:
             result.append(issue)
+            result_keys.append(key)
     return result
 
 
@@ -6306,26 +6392,18 @@ def _load_review_spec_texts(db: Session):
         except Exception as exc:
             print(f"[审核] 读取知识库规范文件失败 {spec_key}: {exc}")
             spec_texts[spec_key] = ""
-    # 知识库文件可能因部署环境权限（如 sandbox 对 ~/.smart-doc-platform 的限制）
-    # 读取失败。此时回退到仓库内置的同源规范副本，避免语义提示词丢掉写作规范。
-    # 只对仓库确实存在的 md 副本兜底；xlsx checklist 无内置副本，保持原行为。
-    if any(not spec_texts.get(key) for key in ("en_style", "cn_style", "common_errors")):
-        repo_root = Path(__file__).resolve().parents[3]
-        bundled = {
-            "en_style": "MGI英文技术文档写作风格指南.md",
-            "cn_style": "中文技术文档写作风格指南.md",
-            "common_errors": "技术文档常见错误清单与规范.md",
-        }
-        for key, filename in bundled.items():
-            if spec_texts.get(key):
-                continue
-            fallback = repo_root / filename
-            if fallback.exists():
-                try:
-                    spec_texts[key] = fallback.read_text(encoding="utf-8", errors="ignore")
-                    print(f"[审核] 规范文件 {key} 使用仓库内置副本: {filename}")
-                except Exception as exc:
-                    print(f"[审核] 仓库内置规范副本读取失败 {key}: {exc}")
+    # 本地兜底：知识库文件夹缺失或物理文件不可读（ACL）时，回退到「审核依据」本地副本。
+    # 知识库原文优先，仅填充空键，不覆盖已读到的知识库文本。
+    try:
+        from app.review_engine.writing_standards_fallback import load_fallback_spec_texts
+        fallback_texts = load_fallback_spec_texts()
+    except Exception as exc:
+        print(f"[审核] 加载本地规范兜底目录失败: {exc}")
+        fallback_texts = {}
+    for spec_key, fallback_text in fallback_texts.items():
+        if not spec_texts.get(spec_key) and fallback_text:
+            print(f"[审核] 规范基线 {spec_key} 知识库为空，启用本地兜底副本（{len(fallback_text)} 字符）")
+            spec_texts[spec_key] = fallback_text
     return spec_texts
 
 
@@ -6487,6 +6565,25 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
             "is_checklist": True,
         })
     parts.extend(_load_cyy_human_review_basis_sections())
+    # 人工审核判定硬约束：来自《2026历史人工审核意见知识库》的免报清单+判定流程+证据要求。
+    # 断言型意见必须满足证据要求才能出报告——术语一致性润色建议型误报的对症约束。
+    kb_text = spec_texts.get("human_review_kb") or ""
+    if kb_text:
+        try:
+            from app.review_engine.writing_standards_fallback import extract_human_review_kb_constraints
+            constraints = extract_human_review_kb_constraints(kb_text)
+        except Exception as exc:
+            print(f"[审核] 抽取人工审核判定约束失败: {exc}")
+            constraints = ""
+        if constraints:
+            parts.append({
+                "label": "人工审核判定硬约束",
+                "text": "【人工审核判定硬约束】\n" + constraints,
+                "priority": 5,
+                "language": "both",
+                "basis_type": "human_review_constraints",
+                "tags": ["false-positive-guard", "evidence-requirement"],
+            })
     # 人工审核意见的安全激活：抽象问题模式清单（不含具体文档错误原文，避免照搬臆造）
     try:
         from app.review_engine.human_review_patterns import load_pattern_sections
@@ -7695,6 +7792,12 @@ def _generate_compare_review_html_content(review, doc):
         for index, item in enumerate(reference_columns)
     ) or '<div class="empty-state">未提供参考文件</div>'
 
+    hero_text = (
+        '本报告在核心参数与主干流程比对之外，同时按目录标题、货号/型号和带单位数值做中英对照。'
+        if summary.get('bilingual') else
+        '本报告仅对主文档与参考文件中的白名单核心参数，以及“操作流程 / 实验步骤 / 操作步骤 / 注意事项”章节的主干流程进行比对。'
+    )
+
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -7758,7 +7861,7 @@ def _generate_compare_review_html_content(review, doc):
   <div class="container">
     <div class="hero">
       <h1>对比审核报告</h1>
-      <p>本报告仅对主文档与参考文件中的白名单核心参数，以及“操作流程 / 实验步骤 / 操作步骤 / 注意事项”章节的主干流程进行比对。</p>
+      <p>{hero_text}</p>
     </div>
     <div class="meta">
       <div class="meta-card"><div class="meta-label">主文档</div><div class="meta-value">{filename}</div></div>
@@ -8505,15 +8608,6 @@ def _run_chinese_human_baseline_rules(content):
             '请替换为正式内容或删除该占位符',
             '文档中仍存在明显占位符残留，发布前需要替换为正式文本。',
             'CYY人工审核经验基线 - 占位符残留', 'serious', 97,
-        )
-
-    for match in re.finditer(r'basecall\s*软件', normalized, re.IGNORECASE):
-        add_issue(
-            match.start(), match.end(), match.group(0),
-            'CYY-CN-MIXED-008', '中英文混用',
-            '建议统一为“碱基识别软件”或按术语表确认正式中文名称',
-            '中文说明书中残留英文术语，建议统一为正式中文术语。',
-            'CYY人工审核经验基线 - 中文说明书术语统一', 'serious', 95,
         )
 
     for match in re.finditer(r'日期\s+(?:版本\s+)?20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日', normalized):
@@ -9641,22 +9735,136 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 离心管缺字纠正', 'general', 91,
         )
 
-    for match in re.finditer(r'2\s*℃\s*~\s*8\s*℃', normalized):
+    for match in re.finditer(r'\d+(?:\.\d+)?℃(?:\s*[~～\-]\s*\d+(?:\.\d+)?℃)?', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        suggestion = re.sub(r'(\d)\s*(℃)', r'\1 \2', raw)
+        suggestion = re.sub(r'\s*([~～\-])\s*', r' \1 ', suggestion)
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-001', '数字与单位格式',
-            '建议统一为“2 ℃ ~ 8 ℃”',
+            f'建议统一为“{suggestion}”',
             '单位前面加空格。数字、波浪线与温度单位的空格风格需要统一。',
             'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
         )
 
-    for match in re.finditer(r'0\.2mL', normalized):
+    for match in re.finditer(r'\d+(?:\.\d+)?mL\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)mL', r'\1 mL', raw)
         add_issue(
-            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            match.start(), match.end(), raw,
             'CYY-CN-FMT-002', '数字与单位格式',
-            '建议统一为“0.2 mL”',
+            f'建议统一为“{fixed}”',
             '单位前面加空格。数字与体积单位之间的空格风格需要统一。',
             'CYY人工审核经验基线 - 体积单位空格', 'serious', 92,
+        )
+
+    # 存储容量 / 时间 / 长度单位紧贴数字（Tina R02 批注：单位前面缺空格）
+    for match in re.finditer(r'\d+(?:\.\d+)?(?:GB|TB|MB)\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'([\d.])(GB|TB|MB)\b', r'\1 \2', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-004', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。存储容量单位（GB/TB/MB）与数字之间需要空格。',
+            'CYY人工审核经验基线 - 存储容量单位空格', 'general', 90,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?min\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)min', r'\1 min', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-005', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。时间单位 min 与数字之间需要空格。',
+            'CYY人工审核经验基线 - 时间单位空格', 'general', 90,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?bp\b', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'(\d)bp', r'\1 bp', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-006', '数字与单位格式',
+            f'建议统一为“{fixed}”',
+            '单位前面加空格。长度单位 bp 与数字之间需要空格。',
+            'CYY人工审核经验基线 - 长度单位空格', 'general', 90,
+        )
+
+    # 全角括号前多余空格（Tina R02 批注 p41：600 mm （宽））
+    for match in re.finditer(r'\d+\s*(?:mm|cm)\s+（[^）]{1,6}）', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        fixed = re.sub(r'\s+（', '（', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-007', '数字与单位格式',
+            f'建议删除括号前空格：“{fixed}”',
+            '全角括号前存在多余空格，尺寸标注格式不规范。',
+            'CYY人工审核经验基线 - 括号前多余空格', 'general', 89,
+        )
+
+    # 中文后半角冒号（Tina R02 批注 p113：登录界面:）
+    for match in re.finditer(r'[\u4e00-\u9fff]:', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNC-003', '标点符号',
+            f'建议改为全角冒号：“{match.group(0)[:-1]}：”',
+            '中文语境中使用了半角冒号，应改为全角冒号。',
+            'CYY人工审核经验基线 - 中文全角冒号', 'general', 91,
+        )
+
+    # 中文语境括号半全角配对错乱（如“（xxx)”或“(xxx）”）——
+    # 只报开闭方向不匹配，不报“该用全角却用半角”（英文/型号/公式中半角括号是合法惯例，避免误报）
+    for match in re.finditer(r'（[^（）()]{1,60}\)|\([^()（）]{1,60}）', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if raw.startswith('（'):
+            fixed = raw[:-1] + '）'
+        else:
+            fixed = '(' + raw[1:]
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-PUNC-004', '标点符号',
+            f'括号开闭方向不匹配，建议改为“{fixed}”',
+            '括号开闭括号半全角不一致（开括号与闭括号必须同一全半角形式）。',
+            'CYY人工审核经验基线 - 括号半全角配对', 'general', 90,
+        )
+
+    # 人工审核确认的文件名拼写（Tina R02 批注 p117/p118）
+    for match in re.finditer(r'Workpace', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '拼写错误',
+            '建议改为“Workspace”',
+            '界面截图为 Workspace，正文少了一个字母 s。',
+            'CYY人工审核经验基线 - Workspace拼写', 'serious', 95,
+        )
+
+    for match in re.finditer(r'Sequencetat', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-008', '拼写错误',
+            '建议改为“SequenceStat”',
+            '与同段 BarcodeStat.txt 命名规律不符，SequenceStat.txt 少了字母 s。',
+            'CYY人工审核经验基线 - SequenceStat拼写', 'serious', 95,
+        )
+
+    for match in re.finditer(r'平均数据产出数据量', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REDUNDANCY-004', '重复内容',
+            '建议改为“平均产出数据量”',
+            '“数据产出数据量”语义重复，应精简。',
+            'CYY人工审核经验基线 - 产出数据量表述', 'general', 91,
+        )
+
+    for match in re.finditer(r'废液存储组件', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-032', '术语一致性',
+            '建议统一为“废液储存组件”',
+            '同表前文使用“试剂储存组件”，此处“存储”与“储存”不统一。',
+            'CYY人工审核经验基线 - 储存术语统一', 'general', 90,
         )
 
     for match in re.finditer(r'\d+(?:\.\d+)?VDC，\d+(?:\.\d+)?A', normalized):
@@ -13245,6 +13453,29 @@ def run_term_check(content, terms):
     return issues
 
 
+_TYPO_CATEGORIES = {"拼写错误", "拼写/用词错误", "拼写", "术语一致性", "格式规范", "格式排版"}
+
+
+def _is_rule_ai_same_typo(a, b):
+    """规则引擎报单个词、AI 报同一文件名的整句拼写问题 → 视为同一问题。"""
+    def src(x):
+        return str(x.get("source") or "").lower()
+
+    rule_issue, ai_issue = (a, b) if src(a) in {"rule", "spellcheck", "term"} else (b, a)
+    if src(rule_issue) not in {"rule", "spellcheck", "term"} or src(ai_issue) != "ai":
+        return False
+    rule_text = str(rule_issue.get("original_text") or "").strip()
+    ai_text = str(ai_issue.get("original_text") or "").strip()
+    # 拼错的词本身足够独特（≥6 字符），页码由不同阶段回填、可能不一致，
+    # 因此不比页码，避免 AI 条目页码未回填时漏合并。
+    if len(rule_text) < 6 or rule_text not in ai_text or rule_text == ai_text:
+        return False
+    if str(ai_issue.get("category") or "") in _TYPO_CATEGORIES:
+        return True
+    blob = " ".join(str(ai_issue.get(k) or "") for k in ("description", "suggestion", "rule"))
+    return bool(re.search(r"拼写|拼错|少.{0,3}字母|漏.{0,2}字母|文件名|文件名称", blob))
+
+
 def dedupe_issues_by_original(issues):
     """按 '分类 + 归一化原文 + 位置相近' 合并, 并保留出现次数最多的项"""
     if not issues:
@@ -13309,8 +13540,17 @@ def dedupe_issues_by_original(issues):
             continue
         from app.review_engine.matching.identity import issue_identity_key
         key = issue_identity_key(issue)
+        span_key = _ai_chunk_span_key(issue)
         matched_index = None
         for index, existing in enumerate(seen):
+            # 同一 AI 分块同一片段的同一问题，AI 自造的 chapter 可能只差"第N步"
+            if span_key is not None and _ai_chunk_span_key(existing) == span_key:
+                matched_index = index
+                break
+            # 必须早于 chapter/page 判断：规则条目与 AI 条目的章节名、页码来源不同
+            if _is_rule_ai_same_typo(existing, issue):
+                matched_index = index
+                break
             existing_chapter = _norm_chapter(existing.get("chapter"))
             issue_chapter = _norm_chapter(issue.get("chapter"))
             if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
@@ -13319,6 +13559,17 @@ def dedupe_issues_by_original(issues):
             issue_page = key[3]
             if existing_page and issue_page and existing_page != issue_page:
                 continue
+            # 同页同原文的 AI 条目：AI 常把同一标题标到相邻小节（章节名不同）→ 合并
+            if (
+                _same_issue(original_text, existing.get("original_text", ""))
+                and issue_page
+                and issue_page == existing_page
+                and str(issue.get("source") or "").lower() == "ai"
+                and str(existing.get("source") or "").lower() == "ai"
+                and str(issue.get("category") or "") == str(existing.get("category") or "")
+            ):
+                matched_index = index
+                break
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
                 and issue_chapter == existing_chapter
@@ -14077,6 +14328,24 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_new_issues = len(issues) - pre_ai_count
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
+            # AI 模式下补跑确定性补充审计（引用完整性/术语基线/数值-单位空格等）。
+            # 这些规则此前只挂在 rule/hybrid 分支，mode=ai 时被整体跳过，
+            # 导致 goldset6 中文文档「-20℃ 缺空格」等确定性漏检（2026-11-25 验证：
+            # 规则在解析文本上可正确产出 4 条，但审核管道未调用）。
+            if engine_mode == "ai" and not snippet_review and document.file_type != 'xlsx':
+                try:
+                    ai_supplemental_issues = _run_reference_and_term_consistency_audit(
+                        db, content, doc_id=str(getattr(document, "filename", "") or "")
+                    )
+                    print(f"[审核] AI模式补充确定性审计发现问题: {len(ai_supplemental_issues)}个")
+                    for _dbg in ai_supplemental_issues[:10]:
+                        print(f"[审核] 补充审计明细: rule={_dbg.get('rule')} sev={_dbg.get('severity')} "
+                              f"src={_dbg.get('source')} orig={str(_dbg.get('original_text'))[:40]!r} "
+                              f"pos={str(_dbg.get('position'))[:80]!r}")
+                    issues.extend(ai_supplemental_issues)
+                except Exception as e:
+                    print(f"[审核] AI模式补充确定性审计执行失败: {e}")
+
         if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
             # 第一次回填：去重键的第 4 位是页码槽位，必须在 _finalize_review_issues 之前填好
             filled = _backfill_issue_page_numbers(issues, content)
@@ -14142,6 +14411,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         from app.review_engine.evidence import enrich_issue_evidence
         from app.review_engine.profile import apply_rule_gating
         from app.review_engine.issue_status import compute_status_counts
+        # 兜底：视觉复核与证据补全阶段可能重新注入同分块同一片段的问题
+        issues = _dedup_across_chunks(issues)
+        # 视觉复核重注入的是未经统一去重的副本，需再走一次通用去重
+        issues = dedupe_issues_by_original(issues)
         gated, rule_gate_diagnostics = apply_rule_gating(issues, document_profile)
         issues = [enrich_issue_evidence(issue, document_model, source_format=pairing.source_format) for issue in gated]
         if pairing.input_mode == 'B':
@@ -15190,7 +15463,7 @@ def _extract_step_index(text):
 
 COMPARE_PARAM_DEFINITIONS = [
     {"dimension": "基础信息", "name": "产品名称", "priority": "P0", "aliases": ["产品名称", "产品名", "产品名称name", "productname"]},
-    {"dimension": "基础信息", "name": "货号", "priority": "P0", "aliases": ["货号", "产品货号", "订货号", "目录号", "catalognumber", "catno", "货号catno"]},
+    {"dimension": "基础信息", "name": "货号", "priority": "P0", "aliases": ["货号", "产品货号", "订货号", "目录号", "catalognumber", "catalogno", "cat.no.", "cat no", "catno", "货号catno"]},
     {"dimension": "基础信息", "name": "规格", "priority": "P0", "aliases": ["规格", "产品规格", "包装规格", "specification", "规格型号"]},
     {"dimension": "基础信息", "name": "储存条件", "priority": "P1", "aliases": ["储存条件", "储存", "存储条件", "保存条件", "storage", "storagecondition"]},
     {"dimension": "基础信息", "name": "有效期", "priority": "P1", "aliases": ["有效期", "保质期", "失效日期", "稳定期", "shelflife", "expiry", "expiration"]},
@@ -15212,6 +15485,10 @@ COMPARE_PARAM_DEFINITIONS = [
 COMPARE_ALLOWED_MODES = {"both", "bilingual"}
 COMPARE_FLOW_SECTION_KEYWORDS = ("操作流程", "实验步骤", "操作步骤", "注意事项")
 COMPARE_STEP_PATTERN = re.compile(r"^(?:step\s*\d+\s*[:：\.-]?|\d+[\.)、]\s*|[一二三四五六七八九十]+[、.]\s*|[-*•]\s+)", re.IGNORECASE)
+COMPARE_JUNK_PARAM_VALUES = {
+    "说明书", "user manual", "usermanual", "manual", "restarting the device",
+    "表示该仪器的制造商", "indicates the name and address of the device",
+}
 COMPARE_HEADING_PATTERN = re.compile(r"^(?:\d+(?:\.\d+){0,2}\s+)?[\u4e00-\u9fffA-Za-z].{0,24}$")
 
 
@@ -15224,7 +15501,13 @@ def _normalize_compare_param_key(name):
 def _normalize_compare_param_value(value):
     text = parse_value(str(value or "")).strip()
     text = re.sub(r"\s+", " ", text)
-    return text.strip("；;，, ")
+    text = text.strip("；;，, ")
+    if text in {"-", "—", "–", "/", "N/A", "n/a", "NA", "无", "None", "null"}:
+        return ""
+    compact = re.sub(r"[\s:：.]+", "", text).casefold()
+    if compact in COMPARE_JUNK_PARAM_VALUES or text.casefold() in COMPARE_JUNK_PARAM_VALUES:
+        return ""
+    return text
 
 
 def _compare_param_name_matches(name, aliases):
@@ -15235,7 +15518,7 @@ def _compare_param_name_matches(name, aliases):
         alias_key = _normalize_compare_param_key(alias)
         if not alias_key:
             continue
-        if key == alias_key or key.startswith(alias_key):
+        if key == alias_key:
             return True
     return False
 
@@ -15333,15 +15616,19 @@ def _normalize_reference_items(items):
     return normalized
 
 
-def _compare_values_match(value_a, value_b):
+def _compare_values_match(value_a, value_b, bilingual=False):
     left = _normalize_compare_param_value(value_a)
     right = _normalize_compare_param_value(value_b)
     if not left or not right:
         return False
-    return _values_equal(left, right)
+    if _values_equal(left, right):
+        return True
+    if bilingual:
+        return align_bilingual_values_match(left, right)
+    return False
 
 
-def _resolve_compare_row_level(field_def, main_value, reference_summary):
+def _resolve_compare_row_level(field_def, main_value, reference_summary, bilingual=False):
     priority = field_def.get("priority", "P1")
     field_name = str(field_def.get("name") or "")
     reference_values = reference_summary.get("values") or []
@@ -15358,15 +15645,21 @@ def _resolve_compare_row_level(field_def, main_value, reference_summary):
         return priority, "主文档缺少该字段，请补充并与参考文件核对。"
     if main_value and reference_summary["status"] == "missing":
         return "P2", "参考文件未形成可用参照值，请人工确认主文档内容。"
-    matched_values = [value for value in reference_values if _compare_values_match(main_value, value)]
+    matched_values = [value for value in reference_values if _compare_values_match(main_value, value, bilingual=bilingual)]
     if len(matched_values) == len(reference_values):
         return "一致", "主文档与参考文件一致。"
     if matched_values:
         return "P2", "主文档与少量参考文件一致，但参照物之间存在多个版本，请确认最终版本。"
+    if bilingual:
+        statuses = [align_bilingual_value_status(main_value, value) for value in reference_values]
+        if statuses and all(status == "translation" for status in statuses):
+            return "P2", "中英表述不同，未检出可对齐的货号或数值，请人工确认译名是否对应。"
+        if statuses and all(status == "match" for status in statuses):
+            return "一致", "中英核心数值或型号一致。"
     return priority, "主文档与参考文件不一致，请按最终版本修正。"
 
 
-def _build_compare_param_rows(main_doc, reference_docs):
+def _build_compare_param_rows(main_doc, reference_docs, bilingual=False):
     rows = []
     for field_def in COMPARE_PARAM_DEFINITIONS:
         main_value = _extract_compare_field_value(main_doc.get("params") or [], field_def)
@@ -15379,7 +15672,7 @@ def _build_compare_param_rows(main_doc, reference_docs):
         ])
         reference_values = [item.get("value") for item in reference_items]
         reference_summary = _reference_value_summary(reference_values)
-        level, conclusion = _resolve_compare_row_level(field_def, main_value, reference_summary)
+        level, conclusion = _resolve_compare_row_level(field_def, main_value, reference_summary, bilingual=bilingual)
         rows.append({
             "dimension": field_def["dimension"],
             "parameter_name": field_def["name"],
@@ -15453,9 +15746,13 @@ def _summarize_flow_profile(profile):
     return f"{heading_text}；识别到 {len(profile.get('steps') or [])} 个主干步骤"
 
 
-def _build_compare_flow_row(main_doc, reference_docs):
-    main_profile = _extract_flow_profile(main_doc.get("text") or "")
-    reference_profiles = [_extract_flow_profile(doc.get("text") or "") for doc in reference_docs]
+def _build_compare_flow_row(main_doc, reference_docs, bilingual=False):
+    if bilingual:
+        main_profile = extract_bilingual_flow_profile(main_doc.get("text") or "")
+        reference_profiles = [extract_bilingual_flow_profile(doc.get("text") or "") for doc in reference_docs]
+    else:
+        main_profile = _extract_flow_profile(main_doc.get("text") or "")
+        reference_profiles = [_extract_flow_profile(doc.get("text") or "") for doc in reference_docs]
     reference_step_counts = [len(profile.get("steps") or []) for profile in reference_profiles]
     nonzero_reference_step_counts = [count for count in reference_step_counts if count > 0]
     count_counter = Counter(nonzero_reference_step_counts)
@@ -15485,26 +15782,30 @@ def _build_compare_flow_row(main_doc, reference_docs):
         conclusion = "参考文件未识别到主干流程步骤，当前无法完成有效比对，请先检查参考文件内容或格式。"
     elif main_count == 0 and majority_step_count > 0:
         level = "P1"
-        conclusion = "主文档未识别到主干流程步骤，请补充“操作流程/实验步骤/操作步骤/注意事项”章节。"
+        conclusion = (
+            "主文档未识别到主干流程步骤，请补充对应操作流程章节。"
+            if bilingual else
+            "主文档未识别到主干流程步骤，请补充“操作流程/实验步骤/操作步骤/注意事项”章节。"
+        )
     elif majority_step_count > 0 and abs(main_count - majority_step_count) / majority_step_count > 0.3:
         level = "P1"
         conclusion = f"主文档主干步骤数为 {main_count}，参考文件众数为 {majority_step_count}，差异超过 30%。"
-    elif missing_steps:
+    elif missing_steps and not bilingual:
         level = "P1"
         conclusion = f"主文档缺少参考文件中的主干步骤：{'；'.join(missing_steps)}。"
     else:
         level = "一致"
-        conclusion = "主文档主干流程与参考文件整体一致。"
+        conclusion = "中英文主干步骤数整体一致。" if bilingual else "主文档主干流程与参考文件整体一致。"
 
     reference_heading_values = [
-        _summarize_flow_profile(profile)
+        (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(profile)
         for profile in reference_profiles
         if (profile.get("sections") or profile.get("steps"))
     ]
     reference_heading_items = _normalize_reference_items([
         {
             "filename": doc.get("filename") or "参考文件",
-            "value": _summarize_flow_profile(profile),
+            "value": (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(profile),
         }
         for doc, profile in zip(reference_docs, reference_profiles)
     ])
@@ -15512,7 +15813,7 @@ def _build_compare_flow_row(main_doc, reference_docs):
     return {
         "dimension": "操作流程",
         "parameter_name": "主干流程",
-        "main_value": _summarize_flow_profile(main_profile),
+        "main_value": (summarize_bilingual_flow_profile if bilingual else _summarize_flow_profile)(main_profile),
         "reference_values": reference_heading_items,
         "reference_summary": reference_summary["display_value"],
         "reference_detail": _reference_detail_summary(reference_heading_items),
@@ -15528,6 +15829,9 @@ def _compare_level_order(level):
 
 
 def _build_compare_audit_payload(main_doc, reference_docs, mode):
+    main_text = main_doc.get("text") or ""
+    reference_texts = [doc.get("text") or "" for doc in reference_docs]
+    auto_bilingual = is_bilingual_compare(main_text, reference_texts)
     bilingual_segment_pairs: list = []
     if mode == "bilingual":
         # 四层管道：句对对齐 + 确定性比对 + 语义判定（LLM 可用时）+ 三道硬闸。
@@ -15544,23 +15848,44 @@ def _build_compare_audit_payload(main_doc, reference_docs, mode):
         audit = run_bilingual_audit(main_doc, reference_docs, llm=llm_call)
         compare_rows = audit["rows"]
         bilingual_segment_pairs = audit.get("segment_pairs") or []
+        # 四层管道之外补目录级对齐：一侧目录漏译时仍能报 P1。
+        compare_rows.extend(build_bilingual_align_rows(main_doc, reference_docs, toc_only=True))
+        bilingual_active = True
+    elif auto_bilingual:
+        # 未显式选模式时，中英各一份自动追加目录对照。
+        compare_rows = _build_compare_param_rows(main_doc, reference_docs, bilingual=True)
+        compare_rows.append(_build_compare_flow_row(main_doc, reference_docs, bilingual=True))
+        compare_rows.extend(build_bilingual_align_rows(main_doc, reference_docs, enable_ai=False))
+        bilingual_active = True
     else:
         compare_rows = _build_compare_param_rows(main_doc, reference_docs)
         compare_rows.append(_build_compare_flow_row(main_doc, reference_docs))
+        bilingual_active = False
     compare_rows = sorted(compare_rows, key=lambda row: (_compare_level_order(row.get("level")), row.get("dimension"), row.get("parameter_name")))
     summary_counts = Counter(row.get("level") for row in compare_rows)
+    main_lang = align_detect_doc_language(main_text)
     return {
         "main_document": {
             "filename": main_doc["filename"],
-            "char_count": len(main_doc.get("text") or ""),
+            "char_count": len(main_text),
+            "language": main_lang,
+            "language_label": align_language_label(main_lang),
         },
         "reference_documents": [
-            {"filename": doc["filename"], "char_count": len(doc.get("text") or "")}
+            {
+                "filename": doc["filename"],
+                "char_count": len(doc.get("text") or ""),
+                "language": align_detect_doc_language(doc.get("text") or ""),
+                "language_label": align_language_label(align_detect_doc_language(doc.get("text") or "")),
+            }
             for doc in reference_docs
         ],
         "summary": {
             "mode": mode,
             "reference_count": len(reference_docs),
+            "bilingual": bilingual_active,
+            "main_language": main_lang,
+            "main_language_label": align_language_label(main_lang),
             "p0_count": summary_counts.get("P0", 0),
             "p1_count": summary_counts.get("P1", 0),
             "p2_count": summary_counts.get("P2", 0),
@@ -15568,10 +15893,11 @@ def _build_compare_audit_payload(main_doc, reference_docs, mode):
             "total_issue_count": summary_counts.get("P0", 0) + summary_counts.get("P1", 0) + summary_counts.get("P2", 0),
             "row_count": len(compare_rows),
             "pair_languages": {
-                "main": detect_bilingual_language(main_doc.get("text") or ""),
-                "references": [detect_bilingual_language(doc.get("text") or "") for doc in reference_docs],
+                "main": detect_bilingual_language(main_text),
+                "references": [detect_bilingual_language(text) for text in reference_texts],
             },
             "bilingual_row_count": len([row for row in compare_rows if str(row.get("kind") or "").startswith("bilingual_")]),
+            "toc_row_count": len([row for row in compare_rows if row.get("kind") == "bilingual"]),
         },
         "compare_rows": compare_rows,
         "segment_pairs": bilingual_segment_pairs,
@@ -15602,14 +15928,15 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             f"{item.get('filename') or '参考文件'}：{item.get('value') or '-'}"
             for item in (row.get("reference_values") or [])
         ]
-        is_bilingual = bool(str(row.get('kind') or '').startswith('bilingual_'))
+        kind = str(row.get('kind') or '')
+        is_bilingual = kind == 'bilingual' or kind.startswith('bilingual_')
         context_lines = [f"主文档：{row.get('main_value') or '-'}", *reference_lines]
         if is_bilingual and row.get('evidence'):
             context_lines.append(f"双向举证：{row['evidence']}")
         payloads.append(IssueCreate(
             review_id=review_id,
             severity=severity_map.get(level, "general"),
-            category='中英对照' if is_bilingual else ('核心参数对比' if row.get('kind') == 'parameter' else '主干流程比对'),
+            category='中英对照' if is_bilingual else ('核心参数对比' if kind == 'parameter' else '主干流程比对'),
             rule='',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
@@ -15618,7 +15945,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             description=str(row.get('conclusion') or '对比审核发现差异'),
             audit_basis='对比审核 - 中英对照差异明细表' if is_bilingual else '对比审核 - 核心参数差异明细表',
             confidence=90 if is_bilingual else 95,
-            source='compare_bilingual' if is_bilingual else ('compare_param' if row.get('kind') == 'parameter' else 'compare_flow'),
+            source='compare_bilingual' if is_bilingual else ('compare_param' if kind == 'parameter' else 'compare_flow'),
             position=_encode_issue_position_with_meta(0, 0, compare_type=row.get('kind'), compare_level=level, parameter_name=row.get('parameter_name')),
             status='pending',
         ))
@@ -15691,6 +16018,8 @@ async def compare_audit(
     for issue_payload in _build_compare_issue_payloads(review.id, compare_payload):
         create_issue(db, issue_payload)
 
+    bilingual = bool((compare_payload.get("summary") or {}).get("bilingual"))
+    done_message = "中英对照审核完成" if bilingual else "对比审核完成"
     compare_summary = {
         **compare_payload.get("summary", {}),
         "compare_rows": compare_payload.get("compare_rows") or [],
@@ -15698,7 +16027,7 @@ async def compare_audit(
         "main_filename": main_doc["filename"],
         "reference_documents": compare_payload.get("reference_documents") or [],
         "reference_filenames": [doc["filename"] for doc in reference_docs],
-        "message": "对比审核完成",
+        "message": done_message,
     }
     update_review_status(
         db,
@@ -15707,12 +16036,12 @@ async def compare_audit(
         int(compare_summary.get("total_issue_count") or 0),
         json.dumps(compare_summary, ensure_ascii=False),
     )
-    set_progress(review.id, 'completed', '完成', 100, '对比审核完成')
+    set_progress(review.id, 'completed', '完成', 100, done_message)
 
     return {
         "review_id": review.id,
         "status": "completed",
-        "message": "对比审核完成",
+        "message": done_message,
         "document_id": document.id,
         **compare_payload,
     }
