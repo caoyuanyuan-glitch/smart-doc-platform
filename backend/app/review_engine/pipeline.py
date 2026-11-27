@@ -131,6 +131,7 @@ CONFIRMED_SPELLING_RULES = {
     "SPELL-INS",     # 文档内词表确证（插入/删除字符）
     "SPELL-SPLIT",   # PDF 固定短语确证
     "SPELL-PHRASE",  # PDF 固定短语确证
+    "SPELL-JOIN",    # 词典双高频词唯一切分确证（粘连词拆分）
 }
 
 # 猜测型拼写规则：仅凭词典候选，无法确定正确写法。
@@ -656,7 +657,7 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
-    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE", "SPELL-TRANS", "SPELL-PROP"}:
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE", "SPELL-TRANS", "SPELL-PROP", "SPELL-JOIN"}:
         if is_confirmed_spelling_issue(data):
             # 确证型拼写错误：正确写法有唯一可靠依据（文档内词表 /
             # 专有名词库 / 人工错拼表），应当与猜测型区别对待。
@@ -825,14 +826,17 @@ def dedupe_key(issue: Any) -> str:
     original = compact_text(data["original_text"])
     source = str(data["source"] or "").lower()
     rule = str(data["rule"] or "").upper()
+    page = _page_token_from_position(data.get("position"))
     semantic_group = CYY_SEMANTIC_DEDUPE_RULES.get(rule)
     if semantic_group:
-        return f"cyy-semantic|{semantic_group}"
+        # 语义组去重保留页码：跨页出现的同类术语/表达是不同位置的不同问题，
+        # 合并成 1 条会让长文档尾页问题消失，直接压低召回。
+        return f"cyy-semantic|{semantic_group}|{page}"
     if topic:
         return f"topic|{topic}|{original[:80]}"
     if rule in {"CYY-CN-PLACEHOLDER-001", "CYY-CN-MATERIAL-001"}:
-        return rule
-    page = _page_token_from_position(data.get("position"))
+        # 占位符/物料同类问题按页保留，避免整篇同类只报 1 条。
+        return f"{rule}|{page}"
     if source == "spellcheck" or rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
         return f"spell|{rule}|{original}|{page}"
     if rule in {"UNIT-003", "UNIT-004", "HR011", "STYLE-003", "HR008", "GRAMMAR-001", "GRAMMAR-002"}:
@@ -856,6 +860,9 @@ def sort_key(issue: Any) -> tuple[int, int, int, int, int]:
     data = issue_to_mapping(issue)
     severity = str(data["severity"] or "general").lower()
     severity_group = {"fatal": 0, "serious": 1}.get(severity, 2)
+    # 2026-11-27 实测回滚：曾尝试把首键改为 -value_score，
+    # 6 组 PDF 实测 doc001408 的 issue 数 57→80、严格命中 3→1，
+    # 零收益且严格指标受损。恢复 severity 优先的原口径。
     return (
         severity_group,
         -value_score(data),
@@ -981,11 +988,9 @@ def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: 
         if existing is None or issue_rank(issue) > issue_rank(existing):
             if existing is not None:
                 _log_pipeline_drop("dedupe_shadowed", existing)
-                drop_reasons["dedupe_shadowed"] += 1
             selected_by_key[key] = issue
         else:
             _log_pipeline_drop("dedupe_shadowed", issue)
-            drop_reasons["dedupe_shadowed"] += 1
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
     # 降权项排在高置信结果之后，且仍按 sort_key 内部排序。

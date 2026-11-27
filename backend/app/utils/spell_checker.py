@@ -3621,6 +3621,90 @@ def _find_term_variant_issues(content, seen_issue_keys):
     return issues
 
 
+# 粘连词拆分的最低词频：两段都必须是常用词，才允许判为「两个词粘在一起」。
+# 低频词参与切分会产生大量伪建议（如把生僻品牌名拆开），因此宁可漏报。
+_JOIN_SPLIT_MIN_FREQ = 300
+_JOIN_SPLIT_MAX_ISSUES = 8
+
+
+def detect_joined_words(content, file_type=None):
+    """检测两个常见英文单词粘连成一个词（如 `communicationport` → `communication port`）。
+
+    与拼写检查互补：`_should_skip_spelling_issue` 会把粘连词静默跳过以免误报，
+    本函数专门把这些被跳过的词捞出来，用更严格的条件单独上报：
+
+    1. 原词必须是词典 unknown（合法词 interface/software 直接排除）；
+    2. 必须存在切分，且两段都是**高频**词典词（频率门槛过滤生僻拼接）；
+    3. 合理切分必须唯一（多种切分如 namesand → name+sand / names+and 时放弃）；
+    4. 复用既有白名单/术语/缩写/URL/货号防线，避免误报品牌与型号。
+    """
+    issues = []
+    if not content:
+        return issues
+
+    for match in re.finditer(r"\b[A-Za-z]{8,}\b", content):
+        word = match.group(0)
+        lowered = word.lower()
+
+        if is_whitelisted(word) or _is_domain_abbreviation(word) or _is_technical_term(word):
+            continue
+        if _normalize_for_check(word) in FORCED_MISSPELLINGS or _normalize_for_check(word) in COMMON_MISSPELLINGS:
+            continue
+        if word.lower() in _PDF_SPELL_SKIP_WORDS:
+            continue
+
+        context = _build_spelling_context(content, match.start(), match.end())
+        if re.search(r"@|https?://|www\.", context or "", re.IGNORECASE):
+            continue
+
+        # 关键前置：合法词不进粘连通道（interface/device/software 在这里被排除）。
+        if lowered not in spell.unknown([lowered]):
+            continue
+
+        candidates = []
+        for i in range(2, len(lowered) - 1):
+            left, right = lowered[:i], lowered[i:]
+            if left not in spell or right not in spell:
+                continue
+            if spell.word_frequency[left] < _JOIN_SPLIT_MIN_FREQ:
+                continue
+            if spell.word_frequency[right] < _JOIN_SPLIT_MIN_FREQ:
+                continue
+            candidates.append((left, right, spell.word_frequency[left] + spell.word_frequency[right]))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: -item[2])
+        if len(candidates) > 1:
+            # 多切分时只有「最优切分词频压倒性领先（≥3 倍）」才采信，
+            # 避免 namesand → name+sand / names+and 这类歧义词制造错误建议。
+            if candidates[0][2] < candidates[1][2] * 3:
+                continue
+
+        left, right, _score = candidates[0]
+        suggestion = f"{left} {right}"
+        if suggestion.lower() == lowered:
+            continue
+        issues.append({
+            "severity": "general",
+            "category": "拼写/用词错误",
+            "rule": "SPELL-JOIN",
+            "chapter": _extract_chapter(content, match.start()),
+            "original_text": word,
+            "context": context,
+            "suggestion": suggestion,
+            "description": f"疑似两个单词粘连：`{word}` 可拆为 `{left}` 与 `{right}`。",
+            "audit_basis": "英文单词书写规范",
+            "confidence": 85,
+            "source": "spellcheck",
+            "status": "pending",
+            "position": f"{match.start()}-{match.end()}",
+        })
+        if len(issues) >= _JOIN_SPLIT_MAX_ISSUES:
+            break
+
+    return issues
+
+
 def check_spelling(content, min_word_length=3, file_type=None):
     """
     检查英文文档的拼写错误
@@ -3852,7 +3936,14 @@ def run_spelling_and_grammar_check(content, file_type=None):
     # 1. 拼写检查
     spelling_issues = check_spelling(content, file_type=file_type)
     all_issues.extend(spelling_issues)
-    
+
+    # 1b. 粘连词检测：拼写检查会把粘连词静默跳过，这里单独捞出。
+    # 用 unknown 前置 + 高频唯一切分，合法词与品牌名不会进入。
+    try:
+        all_issues.extend(detect_joined_words(content, file_type=file_type))
+    except Exception as e:
+        print(f"[拼写检查] 粘连词检测执行失败: {e}")
+
     # 2. 语法模式检查
     grammar_issues = check_grammar_patterns(content)
     all_issues.extend(grammar_issues)

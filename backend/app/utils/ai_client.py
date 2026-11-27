@@ -895,6 +895,14 @@ class AIClient:
         if not self.deepseek_client:
             return None
         import time
+        # 评测可复现开关：设置 AI_TEMPERATURE_OVERRIDE=0 可固定输出，
+        # 用于对比代码改动前后的准确率，避免模型随机性干扰归因。
+        override = os.getenv("AI_TEMPERATURE_OVERRIDE", "").strip()
+        if override:
+            try:
+                temperature = float(override)
+            except ValueError:
+                pass
         max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
@@ -1688,16 +1696,27 @@ class AIClient:
         return merged
 
     def _invoke_provider_audit(self, provider_key, messages, max_tokens, request_label=None, review_id=None):
+        # 评测可复现开关：统一覆盖所有 provider 的审核 temperature。
+        # 原先只在 call_deepseek 内部读取，切到 qwen/kimi/arkclaw/proxy 时
+        # AI_TEMPERATURE_OVERRIDE 失效，评测输出不可复现。此处在分派层读取
+        # 一次并显式下传，所有 provider 生效（deepseek 内部仍读一次，幂等）。
+        _temperature = 0.2
+        _override = os.getenv("AI_TEMPERATURE_OVERRIDE", "").strip()
+        if _override:
+            try:
+                _temperature = float(_override)
+            except ValueError:
+                pass
         if provider_key == "qwen":
-            return self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+            return self.call_qwen(messages, max_tokens=max_tokens, temperature=_temperature, request_label=request_label, review_id=review_id)
         if provider_key == "kimi":
-            return self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+            return self.call_kimi(messages, max_tokens=max_tokens, temperature=_temperature, request_label=request_label, review_id=review_id)
         if provider_key == "deepseek":
-            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=_temperature, request_label=request_label, review_id=review_id)
         if provider_key == "arkclaw":
-            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=_temperature, request_label=request_label, review_id=review_id)
         if provider_key == "proxy":
-            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=_temperature, request_label=request_label, review_id=review_id)
         return None
 
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
