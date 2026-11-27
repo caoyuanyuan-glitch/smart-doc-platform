@@ -6392,7 +6392,6 @@ def _load_review_spec_texts(db: Session):
         except Exception as exc:
             print(f"[审核] 读取知识库规范文件失败 {spec_key}: {exc}")
             spec_texts[spec_key] = ""
-
     # 本地兜底：知识库文件夹缺失或物理文件不可读（ACL）时，回退到「审核依据」本地副本。
     # 知识库原文优先，仅填充空键，不覆盖已读到的知识库文本。
     try:
@@ -11322,6 +11321,23 @@ def _run_manual_engineering_audit(content, file_type=None):
             '空格与排版',
             f"{match.group(1)}{match.group(2)} {match.group(3)}",
             '英文标点符号后应保留一个空格，标点后直接连写下一个单词影响可读性与规范一致性。',
+            '说明书审核能力补强方案 - 标点后空格',
+            'general',
+            91,
+        )
+
+    # 冒号后紧跟比较符号（如 digits:≤25）也属缺失空格。
+    # 原规则只匹配冒号后跟字母，漏掉这类场景。此处限定前为字母、
+    # 后为比较运算符，避免与时间 10:30、比例 1:2、标签:值误判。
+    for match in re.finditer(r'([A-Za-z]):([≤≥<>=±])', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-004',
+            '空格与排版',
+            f"{match.group(1)}: {match.group(2)}",
+            '英文标点后应保留一个空格，冒号后直接连接比较符号影响可读性与规范一致性。',
             '说明书审核能力补强方案 - 标点后空格',
             'general',
             91,

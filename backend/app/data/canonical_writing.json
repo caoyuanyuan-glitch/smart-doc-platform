@@ -27,8 +27,15 @@
       "id": "c4",
       "canonical": "double-stranded",
       "category": "核酸结构写法",
-      "note": "double-stranded / single-stranded 为通用写法，首字母小写",
-      "variants": ["Double-stranded", "Single-stranded"]
+      "note": "double-stranded 为通用写法，首字母小写",
+      "variants": ["Double-stranded"]
+    },
+    {
+      "id": "c5",
+      "canonical": "single-stranded",
+      "category": "核酸结构写法",
+      "note": "single-stranded 为通用写法，首字母小写；与 double-stranded 是两个独立概念，不得互为变体",
+      "variants": ["Single-stranded"]
     }
   ]
 }

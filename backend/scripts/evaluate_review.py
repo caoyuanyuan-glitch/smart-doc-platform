@@ -69,6 +69,12 @@ def issue_to_dict(issue):
         "suggestion": issue.suggestion or "",
         "description": issue.description or "",
         "audit_basis": issue.audit_basis or "",
+        # 评测口径修复：Issue 模型把页码藏在 position(JSON Text) 里，
+        # 原先 issue_to_dict 不透传，导致 annotation_baseline 的
+        # _issue_page_from_position 恒取不到页码，strict 页码锚点通道与
+        # 页码冲突排除双双失效。补 position 后严格口径才有页码依据；
+        # _issue_blob 不纳入 position，宽松口径不受影响，可与历史对比。
+        "position": issue.position or "",
     }
 
 
